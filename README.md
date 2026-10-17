@@ -23,7 +23,7 @@ Model review complements eval; it does not replace it. A zero exit code is not p
 |---|---|
 | Keeps one Pi worker session and waits for review decisions at logical checkpoints. | Runs one native Ralph iteration per review boundary. Iterations share the task's `work/` outputs; each gets its own iteration directory. This is not a fully isolated sandbox. |
 
-**Prototype status and known Goal limitation:** this is a local working prototype, not a release-readiness claim. The bridge may stop its worker after the first `agent_settled` without `goal_wait`, although native Goal remains active and begins another turn. The current bridge implementation still has this behavior; it is not fixed here.
+**Prototype status:** this is a local working prototype, not a release-readiness claim. The Goal lifecycle issue where an intermediate `agent_settled` ended the bridge cycle is covered by deterministic regression tests. A new live Goal run has not been performed; this fix does not establish that the Goal route is live-verified.
 
 **Validation note:** the predecessor had live PING → revise → PONG → complete runs. Those runs do not establish live validation of this renamed/current repository. Local unit tests cover protocol behavior, not a live run.
 

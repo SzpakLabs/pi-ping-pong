@@ -129,6 +129,7 @@ class Bridge:
         self.root = Path(config['root'])
         self.proc = None
         self.records = queue.Queue()
+        self.deferred = queue.Queue()
         self.started = time.monotonic()
         self.state = {'run_id': config['run_id'], 'mode': config['mode'], 'status': 'starting', 'cycle': 0}
         self.outstanding = set()
@@ -159,11 +160,14 @@ class Bridge:
         if self.remaining() <= 0:
             raise TimeoutError('Overall wall-clock limit reached')
         try:
-            record = self.records.get(timeout=seconds)
+            record = self.deferred.get_nowait()
         except queue.Empty:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f'Pi exited unexpectedly: {self.proc.returncode}')
-            return {}
+            try:
+                record = self.records.get(timeout=seconds)
+            except queue.Empty:
+                if self.proc.poll() is not None:
+                    raise RuntimeError(f'Pi exited unexpectedly: {self.proc.returncode}')
+                return {}
         if record.get('type') == 'response' and record.get('id') in self.outstanding:
             self.outstanding.discard(record['id'])
             if not record.get('success'):
@@ -228,17 +232,27 @@ When final review is accepted, call goal_complete with evidence; do not change a
             message = ('Final independent review ACCEPTED. Do not modify task artifacts. Call goal_complete for the current goal_id with evidence.' if final else f'Codex review for previous checkpoint: {feedback}. Read cycle-context.json and CONTRACT.md. Execute the next logical deliverable/correction and checkpoint, then goal_wait.')
         self.send('prompt', message=message)
         deadline = time.monotonic() + self.c['cycle_seconds']
+        self.cycle_deadline = deadline
         outcome = None
         while time.monotonic() < deadline:
-            e = self.next()
-            if e.get('type') == 'tool_execution_end' and not e.get('isError'):
-                text = '\n'.join(x.get('text', '') for x in e.get('result', {}).get('content', []) if x.get('type') == 'text')
+            e = self.next(min(0.25, max(0.01, deadline - time.monotonic())))
+            if e.get('type') == 'tool_execution_end':
                 name = e.get('toolName')
-                prefixes = {'goal_wait': 'Goal waiting:', 'goal_complete': 'Goal complete:', 'goal_blocked': 'Goal blocked:'}
-                if name in prefixes and text.startswith(prefixes[name]):
-                    outcome = name
-                    self.event('pi.goal_tool_accepted', tool=name)
+                if name in {'goal_wait', 'goal_complete', 'goal_blocked'}:
+                    if e.get('isError'):
+                        self.event('pi.goal_tool_rejected', tool=name)
+                        continue
+                    text = '\n'.join(x.get('text', '') for x in e.get('result', {}).get('content', []) if x.get('type') == 'text')
+                    prefixes = {'goal_wait': 'Goal waiting:', 'goal_complete': 'Goal complete:', 'goal_blocked': 'Goal blocked:'}
+                    if text.startswith(prefixes[name]):
+                        outcome = name
+                        self.event('pi.goal_tool_accepted', tool=name)
+            if e.get('type') == 'agent_start' and outcome in {'goal_wait', 'goal_complete', 'goal_blocked'}:
+                self.event('pi.goal_tool_boundary_superseded', tool=outcome)
+                outcome = None
             if e.get('type') == 'agent_settled':
+                if e.get('aborted'):
+                    raise RuntimeError('Pi agent run aborted before Goal boundary')
                 if outcome == 'goal_complete':
                     if not final:
                         raise RuntimeError('Pi completed before independent review')
@@ -246,21 +260,36 @@ When final review is accepted, call goal_complete with evidence; do not change a
                 if outcome == 'goal_wait' and not final:
                     return
                 native = self.goal_state()
-                raise RuntimeError(f'Goal stopped without expected review wait/completion: {outcome}; native status: {native}')
-        raise TimeoutError('Pi logical cycle timeout')
+                if native.get('status') != 'active' or native.get('safetyPauseCause') or native.get('waiting'):
+                    raise RuntimeError(f'Goal stopped or entered an unexpected wait: {native}')
+                if outcome == 'goal_blocked':
+                    raise RuntimeError(f'Goal reported blocked before review: {native}')
+                # A settled agent run is only one turn; Goal may continue automatically.
+                outcome = None
+        raise TimeoutError('Pi logical cycle timeout without an accepted Goal boundary')
 
     def goal_state(self):
         ident = self.send('get_entries')
-        deadline = time.monotonic() + 10
+        deadline = min(time.monotonic() + 10, time.monotonic() + max(0, self.remaining()), getattr(self, 'cycle_deadline', float('inf')))
         while time.monotonic() < deadline:
-            e = self.next()
-            if e.get('id') == ident:
-                states = [x for x in e.get('data', {}).get('entries', []) if x.get('type') == 'custom' and x.get('customType') == 'goal-state']
-                goal = (states[-1].get('data', {}).get('goal') or {}) if states else {}
-                native = {k: goal.get(k) for k in ('id', 'status', 'waiting', 'safetyPauseCause', 'automaticModelTurns')}
-                atomic(self.root / 'native-goal-state.json', native)
-                return native
-        return {'status': 'unavailable'}
+            try:
+                e = self.records.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+            except queue.Empty:
+                if self.proc and self.proc.poll() is not None:
+                    raise RuntimeError(f'Pi exited during Goal state query: {self.proc.returncode}')
+                continue
+            if e.get('id') != ident or e.get('type') != 'response':
+                self.deferred.put(e)
+                continue
+            self.outstanding.discard(ident)
+            if not e.get('success'):
+                raise RuntimeError(f'Pi RPC get_entries failed: {e.get("error")}')
+            states = [x for x in e.get('data', {}).get('entries', []) if x.get('type') == 'custom' and x.get('customType') == 'goal-state']
+            goal = (states[-1].get('data', {}).get('goal') or {}) if states else {}
+            native = {k: goal.get(k) for k in ('id', 'status', 'waiting', 'safetyPauseCause', 'automaticModelTurns')}
+            atomic(self.root / 'native-goal-state.json', native)
+            return native
+        raise TimeoutError('Pi Goal state query timeout')
 
     def ralph_cycle(self, feedback=None):
         n = self.state['cycle']

@@ -133,6 +133,106 @@ class ProtocolTests(unittest.TestCase):
                 duplicate = subprocess.run([sys.executable, str(HERE / 'bridge.py'), 'run', '--config', str(root / 'config.json')], env=env, capture_output=True)
                 self.assertNotEqual(duplicate.returncode, 0)
 
+    def fake_goal_bridge(self, events, status='active'):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__('shutil').rmtree, root, ignore_errors=True)
+        bridge = b.Bridge(dict(run_id='fixture-test', mode='goal', root=str(root), cycle_seconds=1, wall_seconds=5))
+        bridge.state['cycle'] = 1
+        bridge.proc = type('Proc', (), {'poll': lambda self: None})()
+        bridge.proc.stdin = type('Stdin', (), {'write': lambda self, value: None, 'flush': lambda self: None})()
+        bridge.records = __import__('queue').Queue()
+        for event in events:
+            bridge.records.put(event)
+        def send(kind, **values):
+            if kind == 'get_entries':
+                ident = 'state-query'
+                bridge.records.put({'type':'response','id':ident,'success':True,'data':{'entries':[{'type':'custom','customType':'goal-state','data':{'goal':{'status':status,'waiting':None,'safetyPauseCause':None}}}]}})
+                return ident
+            return 'prompt-id'
+        bridge.send = send
+        return bridge
+
+    def test_goal_intermediate_settled_then_accepted_wait_is_boundary(self):
+        events = [
+            {'type':'agent_start'}, {'type':'agent_settled','aborted':False},
+            {'type':'agent_start'},
+            {'type':'tool_execution_end','toolName':'goal_wait','isError':False,'result':{'content':[{'type':'text','text':'Goal waiting: review'}]}},
+            {'type':'agent_settled','aborted':False},
+        ]
+        bridge = self.fake_goal_bridge(events)
+        bridge.goal_cycle()
+        self.assertTrue(bridge.records.empty())
+        types = [json.loads(line)['type'] for line in (bridge.root/'bridge-events.jsonl').read_text().splitlines()] if bridge.events_file.exists() else []
+        self.assertEqual(types.count('pi.agent_settled'), 2)
+
+    def test_multiple_intermediate_goal_turns_share_one_cycle(self):
+        events = []
+        for _ in range(3):
+            events.extend([{'type':'agent_start'}, {'type':'agent_settled','aborted':False}])
+        events.extend([
+            {'type':'tool_execution_end','toolName':'goal_wait','isError':False,'result':{'content':[{'type':'text','text':'Goal waiting: review'}]}},
+            {'type':'agent_settled','aborted':False},
+        ])
+        self.fake_goal_bridge(events).goal_cycle()
+
+    def test_goal_state_query_preserves_interleaved_events(self):
+        bridge = self.fake_goal_bridge([])
+        interleaved = [
+            {'type':'agent_start'},
+            {'type':'agent_settled','aborted':False},
+            {'type':'tool_execution_end','toolName':'goal_wait','isError':False,'result':{'content':[{'type':'text','text':'Goal waiting: reviewer'}]}},
+        ]
+        for event in interleaved:
+            bridge.records.put(event)
+        bridge.records.put({'type':'response','id':'state-query','success':True,'data':{'entries':[]}})
+        self.assertIsNone(bridge.goal_state()['status'])
+        self.assertEqual([bridge.next()['type'] for _ in interleaved], [event['type'] for event in interleaved])
+
+    def test_rejected_goal_wait_is_not_boundary(self):
+        events = [
+            {'type':'tool_execution_end','toolName':'goal_wait','isError':True,'result':{'content':[{'type':'text','text':'Rejected'}]}},
+            {'type':'agent_settled','aborted':False},
+            {'type':'tool_execution_end','toolName':'goal_wait','isError':False,'result':{'content':[{'type':'text','text':'Goal waiting: reviewer'}]}},
+            {'type':'agent_settled','aborted':False},
+        ]
+        self.fake_goal_bridge(events).goal_cycle()
+
+    def test_premature_goal_complete_rejected(self):
+        events = [
+            {'type':'tool_execution_end','toolName':'goal_complete','isError':False,'result':{'content':[{'type':'text','text':'Goal complete: done'}]}},
+            {'type':'agent_settled','aborted':False},
+        ]
+        with self.assertRaisesRegex(RuntimeError, 'before independent review'):
+            self.fake_goal_bridge(events).goal_cycle()
+
+    def test_accepted_final_goal_complete(self):
+        events = [
+            {'type':'tool_execution_end','toolName':'goal_complete','isError':False,'result':{'content':[{'type':'text','text':'Goal complete: done'}]}},
+            {'type':'agent_settled','aborted':False},
+        ]
+        self.fake_goal_bridge(events).goal_cycle(final=True)
+
+    def test_goal_without_progress_hits_cycle_deadline(self):
+        bridge = self.fake_goal_bridge([])
+        bridge.c['cycle_seconds'] = 0.01
+        with self.assertRaisesRegex(TimeoutError, 'without an accepted Goal boundary'):
+            bridge.goal_cycle()
+
+    def test_goal_stopped_or_provider_wait_is_diagnosed(self):
+        for status, reason in [('blocked', 'stopped or entered'), ('active', 'stopped or entered')]:
+            events = [{'type':'agent_settled','aborted':False}]
+            bridge = self.fake_goal_bridge(events, status=status)
+            if status == 'active':
+                bridge.goal_state = lambda: {'status':'active','waiting':'provider retry','safetyPauseCause':None}
+            with self.subTest(status=status), self.assertRaisesRegex(RuntimeError, reason):
+                bridge.goal_cycle()
+        safety_pause = self.fake_goal_bridge([{'type':'agent_settled','aborted':False}])
+        safety_pause.goal_state = lambda: {'status':'active','waiting':None,'safetyPauseCause':'automatic-work-limit'}
+        with self.assertRaisesRegex(RuntimeError, 'stopped or entered'):
+            safety_pause.goal_cycle()
+        with self.assertRaisesRegex(RuntimeError, 'aborted'):
+            self.fake_goal_bridge([{'type':'agent_settled','aborted':True}]).goal_cycle()
+
     def test_invalid_or_stale_decisions_fail_closed(self):
         c = {}
         request = dict(run_id='a', cycle=1, checkpoint_sha256='hash', checkpoint={'status': 'ready'}, eval={'exit_code': 1})
