@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pi Ping Pong"
+  short_description: "Reviewed Pi Goal and Ralph runs through session queues"
+  default_prompt: "Use $pi-ping-pong to launch a bounded Goal or Ralph run with independent checkpoint review."
