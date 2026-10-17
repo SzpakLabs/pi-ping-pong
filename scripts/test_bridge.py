@@ -57,6 +57,35 @@ for line in sys.stdin.buffer:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_contract_separates_authorized_sources_from_evidence(self):
+        for mode in ('goal', 'ralph'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                c = self.config(root, mode)
+                source = root / 'project' / 'source.py'
+                source.parent.mkdir()
+                source.write_text('print("Test source")\n')
+                Path(c['task']).write_text(f'Edit only {source}; put the report in work/.')
+                bridge = b.Bridge(c)
+                bridge.contract()
+                contract = (root / 'CONTRACT.md').read_text()
+                self.assertIn(f'Checkpoint/evidence directory: {root.resolve() / "work"}', contract)
+                self.assertIn('not a source checkout', contract)
+                self.assertIn('explicitly authorized source paths outside work/', contract)
+                self.assertIn('Without explicit task authorization, write only inside work/', contract)
+                self.assertIn('cwd or Git ancestry does not grant write permission', contract)
+                self.assertIn('this run\'s config, task specification, reviewer files, evaluator', contract)
+                self.assertNotIn('scripts outside work', contract)
+                (root / 'work').mkdir()
+                (root / 'work/report.md').write_text('Test source edit report')
+                checkpoint = dict(run_id=c['run_id'], cycle=1, status='ready',
+                                  summary='Test source report', evidence=['report.md'])
+                b.atomic(root / 'work/checkpoint.json', checkpoint)
+                b.validate_checkpoint(c, 1)
+                b.atomic(root / 'work/checkpoint.json', {**checkpoint, 'evidence': ['../project/source.py']})
+                with self.assertRaises(ValueError):
+                    b.validate_checkpoint(c, 1)
+
     def test_evidence_limit_is_configurable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);c=self.config(root);(root/'work').mkdir()

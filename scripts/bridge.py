@@ -204,11 +204,14 @@ class Bridge:
     def contract(self):
         contract = f'''# Reviewed Pi work contract
 Run directory: {self.root}
-Work/output directory: {self.root / 'work'}
+Checkpoint/evidence directory: {self.root / 'work'}
 Task specification: {self.c['task']}
 Read the task and cycle-context.json. Perform ONE logical deliverable or requested correction, not one tool call.
+work/ is a report and checkpoint directory, not a source checkout. Missing source files there do not imply missing access.
+The task may permit edits to explicitly authorized source paths outside work/, including project scripts. Use those source paths directly; keep reports, logs and checkpoint evidence inside work/.
+Without explicit task authorization, write only inside work/; cwd or Git ancestry does not grant write permission. Do not create a checkout, worktree or copy of the project unless the task authorizes it.
 Create outputs yourself. Missing files mean bootstrap work, never a reason to stop early.
-Do not modify bridge config, reviewer files, eval script, scripts outside work, or preserved baseline files. Do not call codex queue yourself. Do not launch other Pi/Goal/Ralph processes.
+Do not modify this run's config, task specification, reviewer files, evaluator, protocol state or preserved baseline files. Task-authorized project source edits do not grant permission to alter the active run machinery. Do not call codex queue yourself. Do not launch other Pi/Goal/Ralph processes.
 At a logical checkpoint write work/checkpoint.json with run_id, cycle (from cycle-context.json), status (progress/ready/needs_human), summary (<=2000 characters), evidence (relative work file paths), next_step and reason_code.
 Keep checkpoint evidence compact: report, manifest/measurement index, relevant code and final changed outputs only; do not list every intermediate tile/log. Link raw artifacts and their hashes from the manifest/index, and have the task evaluator verify them. evidence list limit: {self.c.get('max_evidence_files', 20)} files.
 status=ready means all task deliverables ready for independent FINAL review, not just one step.

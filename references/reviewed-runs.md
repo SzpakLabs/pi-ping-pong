@@ -2,7 +2,7 @@
 
 For manual setup (advanced), use an isolated run directory on the host that owns Pi and can reach the target Codex app-server. Keep private artifacts out of Git, e.g. a project's ignored `data/raw/<run-id>/`. Both agents must see the same paths.
 
-Create `TASK.md`, an independent task-specific `eval.py` outside worker outputs, and `config.json`. The bridge creates `work/`, `reviews/`, `sessions/` and the protocol contract. Task output paths are relative to `work/`. Never put secrets in prompts, checkpoints or review feedback.
+Create `TASK.md`, an independent task-specific `eval.py` outside worker outputs, and `config.json`. The bridge creates `work/`, `reviews/`, `sessions/` and the protocol contract. Report/checkpoint evidence paths are relative to `work/`; this directory is not a source checkout. TASK.md must explicitly identify any authorized project source paths outside `work/`. Workers may edit those paths directly, including project scripts, without copying the project into the run. Without explicit task authorization, authored outputs remain inside `work/`; cwd and Git ancestry do not grant write scope. The active run's config, task, evaluator, reviewer files, protocol state and preserved baselines remain protected. External source files cannot be listed directly as checkpoint evidence: use reports/manifests inside `work/`, and have the independent evaluator inspect the authorized source state. Never put secrets in prompts, checkpoints or review feedback.
 
 Example config (substitute actual authorized values, no guessed thread IDs):
 
