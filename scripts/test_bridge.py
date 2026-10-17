@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Protocol tests use fake executables; no paid providers or real queue calls."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('bridge', HERE / 'bridge.py')
+b = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(b)
+
+FAKE = r'''#!/usr/bin/env python3
+import json,sys,os,re
+from pathlib import Path
+def emit(x): print(json.dumps(x),flush=True)
+if Path(sys.argv[0]).name=='codex':
+ msg=sys.argv[sys.argv.index('--message')+1]
+ match=re.search(r'Read (.+?/reviews/\d+/request.json),',msg)
+ if match:
+  path=Path(match.group(1)); req=json.loads(path.read_text())
+  result={k:req[k] for k in ('run_id','cycle','checkpoint_sha256')}
+  result.update(decision='revise' if req['eval']['exit_code'] else 'complete',feedback='Change result to PONG' if req['eval']['exit_code'] else 'Verified PONG')
+  if os.environ.get('PI_FAKE_HUMAN') and req['cycle']==1:
+   result.update(decision='wait_human',feedback='Need Test choice')
+   import subprocess
+   code="import sys,json,time;from pathlib import Path;time.sleep(0.7);p=Path(sys.argv[1]);r=json.loads(p.read_text());s=json.loads((p.parents[2]/'bridge-status.json').read_text());assert s['status']=='waiting_human';r.update(decision='revise',human_resolved=True,feedback='User supplied Test choice; write PONG');p.write_text(json.dumps(r))"
+   subprocess.Popen([sys.executable,'-c',code,str(path.with_name('review.json'))],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+  path.with_name('review.json').write_text(json.dumps(result))
+ print('Queued fake receipt')
+ sys.exit(0)
+for line in sys.stdin.buffer:
+ cmd=json.loads(line)
+ if cmd['type']=='get_state':
+  emit({'type':'response','id':cmd['id'],'success':True,'data':{'sessionFile':'fake-session.jsonl'}});continue
+ emit({'type':'response','id':cmd['id'],'success':True,'data':{'disposition':'started'}})
+ if cmd['type']!='prompt':continue
+ message=cmd['message']
+ if 'Final independent review ACCEPTED' in message:
+  emit({'type':'tool_execution_end','toolName':'goal_complete','result':{'content':[{'type':'text','text':'Goal complete: verified'}]},'isError':False})
+  emit({'type':'agent_settled','aborted':False});continue
+ ctx=json.loads(Path('cycle-context.json').read_text()); n=ctx['cycle']
+ Path('result.txt').write_text('PING' if n==1 or os.environ.get('PI_FAKE_STUCK') else 'PONG')
+ cp={'run_id':ctx['run_id'],'cycle':n,'status':'ready','summary':'Candidate result','evidence':['result.txt'],'next_step':'review'}
+ if os.environ.get('PI_FAKE_HUMAN') and n==1:cp.update(status='needs_human',reason_code='user_choice')
+ Path('checkpoint.json').write_text(json.dumps(cp))
+ if message.startswith('/ralph'):
+  directory=Path(message.split('--path ',1)[1]);p=directory/'.ralph-runner/status.json';p.parent.mkdir(parents=True);p.write_text(json.dumps({'completedAt':'now','status':'max-iterations','loopToken':f'fake-{n}'}))
+ else:
+  emit({'type':'tool_execution_end','toolName':'goal_wait','result':{'content':[{'type':'text','text':'Goal waiting: reviewer'}]},'isError':False})
+ emit({'type':'agent_settled','aborted':False})
+'''
+
+
+class ProtocolTests(unittest.TestCase):
+    def test_evidence_limit_is_configurable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);c=self.config(root);(root/'work').mkdir()
+            names=[f'proof-{i}.txt' for i in range(21)]
+            for name in names:(root/'work'/name).write_text('Test evidence')
+            b.atomic(root/'work/checkpoint.json',dict(run_id=c['run_id'],cycle=1,status='ready',summary='Test package',evidence=names))
+            with self.assertRaises(ValueError):b.validate_checkpoint(c,1)
+            c['max_evidence_files']=100
+            cp,snapshot=b.validate_checkpoint(c,1)
+            self.assertEqual(len(snapshot['evidence_sha256']),21)
+            b.atomic(root/'config.json',{**c,'max_evidence_files':0})
+            with self.assertRaises(ValueError):b.load_config(root/'config.json')
+
+    def test_pi_transport_binding_and_durable_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            c=self.config(root)
+            c.update(review_transport='pi',pi_session_id='launch-session')
+            c.pop('thread_id')
+            b.atomic(root/'config.json',c)
+            c=b.load_config(root/'config.json')
+            bridge=b.Bridge(c)
+            b.atomic(root/'pi-receiver.json',{'run_id':c['run_id'],'session_id':'launch-session'})
+            directory=root/'reviews/001';directory.mkdir(parents=True)
+            receipt=directory/'queue-receipt.txt'
+            bridge.queue_message('Checkpoint for Sol',receipt)
+            messages=list((root/'pi-inbox').glob('*.message.json'))
+            self.assertEqual(len(messages),1)
+            message=b.read(messages[0])
+            self.assertEqual(message['session_id'],'launch-session')
+            self.assertEqual(message['kind'],'review')
+            self.assertEqual(b.read(receipt)['status'],'queued')
+            with self.assertRaises(RuntimeError):bridge.queue_message('duplicate',receipt)
+            b.atomic(root/'pi-receiver.json',{'run_id':c['run_id'],'session_id':'different-session'})
+            with self.assertRaises(RuntimeError):bridge.queue_message('wrong target',root/'notice.txt')
+            self.assertEqual(len(list((root/'pi-inbox').glob('*.message.json'))),1)
+
+    def config(self, root, mode='goal'):
+        c = dict(run_id='fixture-test', mode=mode, thread_id='test-thread', worker_model='test-worker', review_model='test-reviewer', task='TASK.md', eval_argv=[sys.executable, str(root / 'eval.py')], max_cycles=3, wall_seconds=20, review_seconds=5, cycle_seconds=5)
+        b.atomic(root / 'config.json', c)
+        (root / 'TASK.md').write_text('Create result.txt containing PONG.')
+        (root / 'eval.py').write_text("from pathlib import Path\nassert Path('result.txt').read_text()=='PONG'\n")
+        return b.load_config(root / 'config.json')
+
+    def test_goal_and_ralph_revise_then_complete(self):
+        for mode, scenario in [('goal','normal'), ('ralph','normal'), ('goal','human'), ('goal','stuck')]:
+            with self.subTest(mode=mode,scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                tools = root / 'bin'
+                tools.mkdir()
+                for name in ('pi', 'codex'):
+                    p = tools / name
+                    p.write_text(FAKE)
+                    p.chmod(0o755)
+                self.config(root, mode)
+                env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH']}
+                if scenario=='human':env['PI_FAKE_HUMAN']='1'
+                if scenario=='stuck':env['PI_FAKE_STUCK']='1'
+                p = subprocess.run([sys.executable, str(HERE / 'bridge.py'), 'run', '--config', str(root / 'config.json')], env=env, capture_output=True, timeout=20)
+                if scenario=='stuck':
+                    self.assertEqual(p.returncode,1,p.stderr.decode())
+                    self.assertIn('Repeated identical',b.read(root/'bridge-status.json')['reason'])
+                    continue
+                self.assertEqual(p.returncode, 0, p.stderr.decode())
+                self.assertEqual(b.read(root / 'bridge-status.json')['status'], 'complete')
+                self.assertEqual((root / 'work/result.txt').read_text(), 'PONG')
+                self.assertEqual(b.read(root / 'reviews/001/request.json')['eval']['exit_code'], 1)
+                self.assertEqual(b.read(root / 'reviews/002/request.json')['eval']['exit_code'], 0)
+                events = [json.loads(x) for x in (root / 'bridge-events.jsonl').read_text().splitlines()]
+                self.assertEqual([x['decision'] for x in events if x['type'] == 'review.applied'], ['revise', 'complete'])
+                if scenario=='human':
+                    self.assertTrue(any(x.get('status')=='waiting_human' for x in events))
+                # Single-use run identity: no silent duplicate work or queue.
+                duplicate = subprocess.run([sys.executable, str(HERE / 'bridge.py'), 'run', '--config', str(root / 'config.json')], env=env, capture_output=True)
+                self.assertNotEqual(duplicate.returncode, 0)
+
+    def test_invalid_or_stale_decisions_fail_closed(self):
+        c = {}
+        request = dict(run_id='a', cycle=1, checkpoint_sha256='hash', checkpoint={'status': 'ready'}, eval={'exit_code': 1})
+        base = dict(run_id='a', cycle=1, checkpoint_sha256='hash', decision='revise', feedback='Fix failed check')
+        self.assertEqual(b.validate_review(c, request, base), 'revise')
+        for change in ({'cycle': 2}, {'run_id': 'b'}, {'checkpoint_sha256': 'wrong'}, {'decision': 'complete'}, {'decision': 'continue'}, {'feedback': ''}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                b.validate_review(c, request, {**base, **change})
+        request['eval']['exit_code'] = 0
+        request['checkpoint']['status'] = 'needs_human'
+        with self.assertRaises(ValueError):
+            b.validate_review(c, request, {**base, 'decision': 'continue'})
+        self.assertEqual(b.validate_review(c, request, {**base, 'decision': 'wait_human'}), 'wait_human')
+        self.assertEqual(b.validate_review(c, request, {**base, 'decision': 'continue', 'human_resolved': True}), 'continue')
+        with self.assertRaises(ValueError):
+            b.validate_review(c, request, {**base, 'decision': 'complete', 'human_resolved': True})
+
+    def test_checkpoint_hashes_and_path_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            c = self.config(root)
+            (root / 'work').mkdir()
+            (root / 'work/result.txt').write_text('PONG')
+            cp = dict(run_id=c['run_id'], cycle=1, status='ready', summary='Done', evidence=['result.txt'])
+            b.atomic(root / 'work/checkpoint.json', cp)
+            _, snap = b.validate_checkpoint(c, 1)
+            self.assertTrue(b.unchanged(c, snap))
+            (root / 'work/result.txt').write_text('changed')
+            self.assertFalse(b.unchanged(c, snap))
+            for path in ('../TASK.md', '.env', '/etc/passwd'):
+                b.atomic(root / 'work/checkpoint.json', {**cp, 'evidence': [path]})
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    b.validate_checkpoint(c, 1)
+            b.atomic(root / 'work/checkpoint.json', {**cp, 'cycle': 0})
+            with self.assertRaises(ValueError):
+                b.validate_checkpoint(c, 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
