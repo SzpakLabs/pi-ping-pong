@@ -50,8 +50,19 @@ try {
   write('pi-inbox/004.message.json',{...envelope,id:'four'});
   await hooks.get('model_select')({},other);
   assert.equal(messages.length,2,'session switch must not inherit subscriptions');
-  assert.ok(commands.has('reviewed-run') && commands.has('reviewed-status'));
-  console.log('Pi receiver: delivery, followUp, model hold, identity, reload and session switch passed.');
+  assert.ok(commands.has('pi-ping-pong') && commands.has('reviewed-run') && commands.has('reviewed-status'));
+  assert.strictEqual(commands.get('pi-ping-pong').handler, commands.get('reviewed-run').handler, 'launcher alias must share the exact handler');
+  const start = path.join(root, 'config.json');
+  for (const name of ['pi-ping-pong', 'reviewed-run']) {
+    ctx.model.id='Luna';
+    await assert.rejects(commands.get(name).handler(start,ctx), /Select reviewer model Sol/);
+    ctx.model.id='Sol';
+    write('launch-attempt.json',{session_id:'Test-session'});
+    await assert.rejects(commands.get(name).handler(start,ctx), /already launched/);
+    fs.unlinkSync(path.join(root,'launch-attempt.json'));
+  }
+  assert.equal(get('pi-inbox/003.delivery.json').status,'rejected_identity','identity refusal remains active');
+  console.log('Pi receiver: launcher alias parity, duplicate refusal, model/identity checks, delivery, reload and session switch passed.');
 } finally {
   await hooks.get('session_shutdown')();
   fs.rmSync(root,{recursive:true,force:true});

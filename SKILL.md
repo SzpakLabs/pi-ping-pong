@@ -9,7 +9,7 @@ Keep the desktop Codex host running for mobile access. Use `codex queue --thread
 
 ## Launching from Pi
 
-For an interactive Pi reviewer (e.g. Sol), load the bundled [Pi receiver](extensions/pi-reviewed.ts), then run `/reviewed-run /absolute/run/config.json`. Use the same task/eval/limit configuration; the command binds its own session ID and selects `review_transport=pi`. Checkpoints arrive as visible custom follow-up messages and trigger reviewer turns. The same `bridge.py decide` command returns decisions. `/reviewed-status` inspects local state without model work. Read [Pi receiver setup](references/reviewed-runs.md#pi-reviewer-transport) for installation, model holds and session lifecycle.
+For an interactive Pi reviewer, load the bundled [Pi receiver](extensions/pi-reviewed.ts), prepare a run config first, then run `/pi-ping-pong /absolute/run/config.json`. `/reviewed-run` remains a compatible alias for the same launcher. Use the same task/eval/limit configuration; the command binds its own session ID and selects `review_transport=pi`. Checkpoints arrive as visible custom follow-up messages and trigger reviewer turns. The same `bridge.py decide` command returns decisions. `/reviewed-status` inspects local state without model work. Read [Pi receiver setup](references/reviewed-runs.md#pi-reviewer-transport) for installation, model holds and session lifecycle.
 
 Do not send into an active Pi by reopening its session file or writing transcript entries. Delivery happens inside its existing process through `pi.sendMessage(..., {deliverAs:"followUp", triggerTurn:true})`.
 

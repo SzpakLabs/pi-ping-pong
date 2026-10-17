@@ -86,11 +86,13 @@ The same bridge supports `review_transport=pi`; Codex remains the default for ex
 
 The source receiver is `../extensions/pi-reviewed.ts`. Install a copy in `~/.pi/agent/extensions/pi-reviewed.ts` for automatic discovery, then `/reload` in an existing Pi. For a one-off session, `pi -e /absolute/path/pi-reviewed.ts` loads it explicitly. Keep the installed copy in sync with the skill source. No global Pi Goal settings or vendor npm packages are changed.
 
-Prepare the same TASK.md, eval.py and config.json with explicit worker/reviewer models and finite bounds. In the Pi session, select its configured review_model (e.g. Sol), then run:
+Prepare the same TASK.md, eval.py and config.json with explicit worker/reviewer models and finite bounds. In the Pi session, select its configured review_model, then run the primary launcher command:
 
 ```
-/reviewed-run /absolute/run/config.json
+/pi-ping-pong /absolute/run/config.json
 ```
+
+`/reviewed-run /absolute/run/config.json` remains a compatible alias to the same command handler and checks. Both commands require an existing `config.json`; neither generates configuration from free-form task text.
 
 This starts the bridge as a detached child and returns immediately. A parent model must not wait synchronously for the bridge to finish. It watches the run-local durable `pi-inbox/` and injects each checkpoint using `pi.sendMessage` with `deliverAs: followUp` and `triggerTurn: true`. While the reviewer is busy, Pi queues the message for after current work. This is not an urgent steering interruption. While idle, a new review turn starts. Custom messages remain visibly distinguishable from human prompts.
 

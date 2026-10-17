@@ -1,5 +1,9 @@
 # Pi Ping Pong
 
+> **TL;DR:** A worker performs the task; a reviewer checks each result and returns concrete feedback. Install this skill and receiver → run `/reload` in Pi → ask an agent to prepare a bounded run and `config.json` → run `/pi-ping-pong <actual-config-path>`. The config must exist first: this command launches a prepared run; it does not turn arbitrary task text into a config. See the [full Pi quick start](#quick-start-reviewer-in-pi).
+>
+> **Goal lifecycle status:** A lifecycle fix is covered by deterministic fake-RPC regression tests. A new live Goal run has not been performed, so Goal routing is not live-verified.
+
 Pi Ping Pong coordinates a **worker** and a separate **reviewer** around bounded Goal or Ralph work. The worker changes files; the reviewer checks the result and a fresh, independent evaluation (eval), then returns specific feedback. The worker can continue or revise within configured cycle and time limits.
 
 This replaces manually copying worker summaries, files, and review notes between agent sessions. It routes compact checkpoints to the reviewer; it does not copy full worker logs into the review request.
@@ -30,7 +34,22 @@ Model review complements eval; it does not replace it. A zero exit code is not p
 ## Requirements
 
 - A POSIX host, Python 3.10+, Node.js, and the `pi` CLI with RPC support. The bridge uses POSIX `fcntl` and process groups; native Windows support is not implemented.
-- Pi Goal and Ralph extensions installed on the host. The bridge defaults to `@narumitw/pi-goal` and `@lnilluv/pi-ralph-loop`; they are not bundled. It expects `/goal`, `goal_wait`, `goal_complete`, and `/ralph`. You can configure a Goal/Ralph extension path in the run config; check your installed package and version.
+- Pi Goal and Ralph extensions installed on the host. The bridge defaults to the packages below; they are not bundled. It expects `/goal`, `goal_wait`, `goal_complete`, and `/ralph`. You can configure an extension path in the run config.
+
+| Component | Current development environment | Upstream |
+|---|---:|---|
+| Pi | 1.3.0 | [Pi](https://github.com/earendil-works/pi) |
+| Goal | `@narumitw/pi-goal` 0.54.11 | [Package source](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-goal) |
+| Ralph | `@lnilluv/pi-ralph-loop` 2.1.0 | [Package source](https://github.com/lnilluv/pi-ralph-loop) |
+
+These are versions present in the current development environment, not recommendations, a compatibility guarantee, or a claim that the packages were tested together. **The Goal lifecycle fix is covered by deterministic regression tests; no new live Goal run has been performed, so the route is not live-verified.** Pi's versioned npm install syntax is `pi install npm:<package>@<version>`; for example:
+
+```sh
+pi install npm:@narumitw/pi-goal@0.54.11
+pi install npm:@lnilluv/pi-ralph-loop@2.1.0
+```
+
+These commands are examples only; this repository's installer does not install or update either dependency.
 - Worker credentials and access for the selected provider, plus reviewer credentials for the selected reviewer model. Pi supports provider-specific OAuth/API-key authentication; configure it in Pi before running. Keep credentials out of run files and Git.
 - Both agents must be able to read the same run/work files. The host must remain available while the run and review are pending.
 
@@ -62,8 +81,10 @@ The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiv
 3. In Pi, run the **slash command** with the actual path created in step 1 (the path below is a placeholder, not a pre-existing file):
 
    ```text
-   /reviewed-run <actual-run-directory>/config.json
+   /pi-ping-pong <actual-run-directory>/config.json
    ```
+
+   `/reviewed-run <actual-run-directory>/config.json` remains a compatible alias for the same launcher.
 
    `/reviewed-status` shows attached run status without starting model work.
 4. The worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.

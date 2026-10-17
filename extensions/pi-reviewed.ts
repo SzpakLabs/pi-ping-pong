@@ -106,11 +106,9 @@ export default function reviewedRuns(pi: ExtensionAPI) {
   });
   pi.on('session_shutdown', async () => clear());
   pi.on('model_select', async (_event, ctx) => { context = ctx; poll(); });
-  pi.registerCommand('reviewed-run', {
-    description: 'Start a bounded Goal/Ralph run; review checkpoints in this Pi session. Usage: /reviewed-run /absolute/run/config.json',
-    handler: async (args, ctx) => {
+  const startReviewedRun = async (args: string, ctx: ExtensionContext) => {
       const file = path.resolve(args.trim().replace(/^(["'])(.*)\1$/, '$2'));
-      if (!args.trim() || path.basename(file) !== 'config.json') throw new Error('Usage: /reviewed-run /absolute/run/config.json');
+      if (!args.trim() || path.basename(file) !== 'config.json') throw new Error('Usage: /pi-ping-pong /absolute/run/config.json');
       const root = path.dirname(file);
       const config = read<Config>(file);
       if (!config.run_id || !config.review_model || !['goal', 'ralph'].includes(String(config.mode))) throw new Error('Config needs run_id, mode=goal|ralph and review_model.');
@@ -138,8 +136,15 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         child.unref();
         ctx.ui.notify(`Started ${config.run_id} (pid ${child.pid}). Checkpoints return to this Pi session.`, 'info');
       } finally { fs.closeSync(fd); }
-    },
-  });
+  };
+  for (const command of ['pi-ping-pong', 'reviewed-run']) {
+    pi.registerCommand(command, {
+      description: command === 'pi-ping-pong'
+        ? 'Start a bounded Goal/Ralph run from config.json. Usage: /pi-ping-pong /absolute/run/config.json'
+        : 'Compatibility alias for /pi-ping-pong.',
+      handler: startReviewedRun,
+    });
+  }
   pi.registerCommand('reviewed-status', {
     description: 'Show reviewed runs attached to this Pi session without starting model work.',
     handler: async (_args, ctx) => {
