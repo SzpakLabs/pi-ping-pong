@@ -1,79 +1,105 @@
 # Pi Ping Pong
 
-Bounded Pi workers, independent evaluations, and checkpoint feedback in the launching Codex or Pi session. One skill; choose `mode: goal` or `mode: ralph` in the run config.
+Pi Ping Pong coordinates a **worker** and a separate **reviewer** around bounded Goal or Ralph work. The worker changes files; the reviewer checks the result and a fresh, independent evaluation (eval), then returns specific feedback. The worker can continue or revise within configured cycle and time limits.
 
-Worker → checkpoint + fresh eval → reviewer queue → decision → worker. The launching turn ends after confirmed start; a queued message starts the review later. Full worker logs are not copied into the reviewer context.
+This replaces manually copying worker summaries, files, and review notes between agent sessions. It routes compact checkpoints to the reviewer; it does not copy full worker logs into the review request.
 
-## Status
+## Example workflow
 
-Local working prototype, prepared for later extraction into a public repository. Original Goal/Ralph and Codex/Pi queue routes passed live PING → revise → PONG → complete tests. The renamed package is checked with local automated tests; a new live run is not implied. Known limitation: the bridge may stop Goal at the first `agent_settled` without `goal_wait`, although native Goal remains active and begins another turn. This project is not affiliated with Pi or OpenAI.
+For example, a worker adds tests, the independent eval runs them, a reviewer checks the changes and eval evidence, and sends concrete corrections back to the worker. The worker makes the next bounded revision and submits another checkpoint. This describes the workflow, **not a live run**. Choose model IDs available and authenticated in your own environment; names used in examples are not required model IDs.
+
+| Term | Meaning |
+|---|---|
+| **Worker** | The Pi Goal or Ralph process that performs the task. |
+| **Reviewer** | A separate model/session that examines the checkpoint, evidence, and eval result. |
+| **Checkpoint** | The worker's compact summary and references to files for one review boundary. |
+| **Eval** | A task-specific command run freshly by the bridge, independently of the worker. |
+
+Model review complements eval; it does not replace it. A zero exit code is not proof that requirements or visual quality are satisfied, and a reviewer decision cannot accept a failed eval.
+
+## Goal and Ralph modes
+
+| Goal | Ralph |
+|---|---|
+| Keeps one Pi worker session and waits for review decisions at logical checkpoints. | Runs one native Ralph iteration per review boundary. Iterations share the task's `work/` outputs; each gets its own iteration directory. This is not a fully isolated sandbox. |
+
+**Prototype status and known Goal limitation:** this is a local working prototype, not a release-readiness claim. The bridge may stop its worker after the first `agent_settled` without `goal_wait`, although native Goal remains active and begins another turn. The current bridge implementation still has this behavior; it is not fixed here.
+
+**Validation note:** the predecessor had live PING → revise → PONG → complete runs. Those runs do not establish live validation of this renamed/current repository. Local unit tests cover protocol behavior, not a live run.
 
 ## Requirements
 
-- POSIX host (the bridge uses `fcntl` and process groups), Python 3.10+, Node.js, authenticated `pi` CLI with RPC support. Windows native support is not implemented.
-- Installed Pi Goal and Ralph extensions exposing `/goal`, `goal_wait`, `goal_complete`, and `/ralph` as used by the bridge. These vendor extensions are not bundled.
-- For Codex review: a running authenticated Codex host with `codex queue --thread ... --model ... --message ...` support and the target chat ID. `exec resume` conflicts with an active desktop writer.
-- For Pi review: the bundled receiver extension loaded in the original reviewer session, with its configured model selected.
-- Task-specific dependencies and access for the worker and evaluator. Both agents must see the same filesystem paths. The host must remain awake and online.
+- A POSIX host, Python 3.10+, Node.js, and the `pi` CLI with RPC support. The bridge uses POSIX `fcntl` and process groups; native Windows support is not implemented.
+- Pi Goal and Ralph extensions installed on the host. The bridge defaults to `@narumitw/pi-goal` and `@lnilluv/pi-ralph-loop`; they are not bundled. It expects `/goal`, `goal_wait`, `goal_complete`, and `/ralph`. You can configure a Goal/Ralph extension path in the run config; check your installed package and version.
+- Worker credentials and access for the selected provider, plus reviewer credentials for the selected reviewer model. Pi supports provider-specific OAuth/API-key authentication; configure it in Pi before running. Keep credentials out of run files and Git.
+- Both agents must be able to read the same run/work files. The host must remain available while the run and review are pending.
 
-Tested predecessor environment: Pi 1.3.0 on macOS. Other versions/platforms require verification; no universal compatibility claim.
+**Reviewer in Pi:** load this repository's receiver in the original reviewer session, select the configured reviewer model, and keep that session available. The receiver uses Pi's extension APIs to deliver queued checkpoints to that session.
+
+**Reviewer in Codex:** a running authenticated Codex host and an existing target chat are required. The bridge invokes `codex queue --thread ... --model ... --message ...`. `codex queue` is a Codex CLI subcommand, not a command provided by this repository; it is environment/version dependent and must be available in your installation. Do not assume every Codex setup has it. `codex exec resume` is not a substitute when the desktop host is already writing to that chat.
+
+The bridge's default extension paths, supported platform, and CLI behavior are implementation details, not a promise that every Pi/Codex version or provider configuration works. See [the full run contract](references/reviewed-runs.md).
 
 ## Install
 
-From this directory:
+The intended clone URL is `https://github.com/SzpakLabs/pi-ping-pong.git`. Repository availability and publication are not asserted here. If the repository is available to you, clone it and install from the checkout:
 
 ```sh
+git clone https://github.com/SzpakLabs/pi-ping-pong.git
+cd pi-ping-pong
 python3 scripts/install.py
 ```
 
-Installs the skill to `~/.agents/skills/pi-ping-pong` and the receiver to `~/.pi/agent/extensions/pi-reviewed.ts`. Existing differing files are backed up before replacement. Reload the reviewer Pi with `/reload`. Do not load a second copy of this receiver alongside the installed one.
+The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiver to `~/.pi/agent/extensions/pi-reviewed.ts`; differing existing files are backed up. In Pi, run `/reload` to load the receiver in an existing session. **Do not load a second copy of this receiver alongside the installed copy.** The installer does not install Goal/Ralph vendor packages or configure credentials.
 
-For a custom skill directory, pass `--skills-dir /absolute/skills`; set `PI_PING_PONG_BRIDGE=/absolute/skills/pi-ping-pong/scripts/bridge.py` in the reviewer Pi environment. This package does not change Goal limits, credentials, or provider configuration.
+## Quick start: reviewer in Pi
 
-## Use from Codex
+1. In your Pi session, ask the agent to prepare a bounded run. Example **request to the agent** (edit to suit your task):
 
-Invoke `$pi-ping-pong` and specify Goal or Ralph, the task, acceptance criteria, worker/reviewer models, and finite bounds. The agent prepares an isolated run directory containing `TASK.md`, `config.json`, and an independent evaluator. Follow [the run contract](references/reviewed-runs.md) for the exact schema and decision commands.
+   > Prepare a Pi Ping Pong run for **[task]**. Use **[Goal or Ralph]**, worker model **[available model ID]**, reviewer model **[available model ID]**, and these acceptance criteria: **[criteria]**. Choose finite cycle and time limits. Create a private run directory containing `TASK.md`, `config.json`, and an independent eval. Do not start the run yet; show me the actual config path and limits.
 
-```sh
-python3 "$HOME/.agents/skills/pi-ping-pong/scripts/bridge.py" run --config /absolute/run/config.json
-```
+2. Review the generated task, criteria, and limits. Select the configured reviewer model in Pi.
+3. In Pi, run the **slash command** with the actual path created in step 1 (the path below is a placeholder, not a pre-existing file):
 
-The launcher must survive the chat turn ending. Confirm `bridge-status.json` records a running worker before ending the turn. Do not stream logs or repeatedly poll using model turns.
+   ```text
+   /reviewed-run <actual-run-directory>/config.json
+   ```
 
-## Use from Pi
+   `/reviewed-status` shows attached run status without starting model work.
+4. The worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.
 
-Prepare the same config, select the configured reviewer model, then:
+## Quick start: reviewer in Codex
 
-```text
-/reviewed-run /absolute/run/config.json
-/reviewed-status
-```
+1. Ask the agent in the target Codex chat to prepare the run. Example **request to the agent**:
 
-The receiver binds the launching session automatically. `mode=goal` keeps a single worker session waiting at logical checkpoints. `mode=ralph` runs one native iteration per review boundary with shared outputs. No vendor package is patched. These commands do not change ordinary standalone `/goal` or `/ralph` behavior.
+   > Prepare a Pi Ping Pong run for **[task]**. Use **[Goal or Ralph]**, worker model **[available model ID]**, reviewer model **[available model ID]**, and these acceptance criteria: **[criteria]**. Choose finite cycle and time limits. Create a private run directory containing `TASK.md`, `config.json`, and an independent eval. Do not start the run yet; show me the actual config path and limits.
 
-## Acceptance and escalation
+2. Review the generated files and limits. The agent should prepare `TASK.md`, `config.json`, and a task-specific eval that runs independently of worker outputs. See [the full config and protocol](references/reviewed-runs.md); do not copy a placeholder path as though it exists.
+3. In the shell on the host with Pi, the bridge, and the Codex host available, run this **shell command**, replacing the placeholder with the actual `config.json` path:
 
-- `continue`: independently verified intermediate result; eval passed.
-- `revise`: repairable failure within scope, with specific feedback.
-- `complete`: all requirements verified, ready checkpoint, fresh eval passed.
-- `wait_human`: actual missing access/secret, approval, or material user choice.
-- `stop`: no authorized useful continuation.
+   ```sh
+   python3 "$HOME/.agents/skills/pi-ping-pong/scripts/bridge.py" run --config <actual-run-directory>/config.json
+   ```
 
-Exit 0 and native completion statuses alone never prove task success. Visual tasks need visual acceptance as well as file/geometry checks. Missing initial outputs mean bootstrap, not human escalation. Keep checkpoints compact; default `max_evidence_files=20` is configurable and counts top-level references, not all artifacts or tokens.
+   Confirm the run reports a running worker before ending the launch turn. The Codex reviewer receives a queued checkpoint in the configured existing chat, reviews the eval and evidence, then records a decision; the bridge returns that decision to the worker. `codex queue` availability and target-chat access are required as described above.
 
-Cycle/time bounds, repeated identical failure, malformed protocol, changed evidence or ambiguous delivery stop the run. Automatic crash recovery is not implemented: inspect saved evidence and delivery state before any explicitly authorized recovery. Never silently replay an existing directory or reset its limits.
+## Limits and safety
 
-## Development
+- Runs have finite cycle and time limits. Exhaustion is not success. Automatic crash recovery is not implemented; inspect saved state before any explicitly authorized recovery.
+- Ask a person only for a real missing input/access, required approval, or material choice. Do not invent approval, request secrets in chat, or silently reset limits.
+- Keep configs, sessions, logs, screenshots, receipts, tokens, and customer data outside this repository. Runtime scope restrictions are cooperative, not an OS sandbox.
+- The worker and reviewer need shared filesystem visibility; keep the host online/available. Ambiguous delivery must be inspected rather than automatically resent.
+- Running a task does not grant permission to commit, push, deploy, or publish.
+
+## Development and validation
+
+Run the local tests from the checkout:
 
 ```sh
 python3 -B scripts/test_bridge.py
 node scripts/test_pi_receiver.mjs
 ```
 
-Receiver tests use the installed Pi package's `jiti` loader. Set `PI_PACKAGE_JSON` to its absolute package.json path for a different installation. Tests use fake worker/queue APIs and no paid model calls. See [AGENTS.md](AGENTS.md) for maintenance invariants.
+They use fake worker/queue APIs and do not require paid model runs. A passing unit test is not live-run acceptance. See [AGENTS.md](AGENTS.md) for maintenance invariants and [reviewed-runs.md](references/reviewed-runs.md) for configuration, protocol, recovery, and reviewer transport details.
 
-## Privacy and publication
-
-Keep run configs, sessions, logs, screenshots, receipts, tokens and customer data outside this repository. Runtime scope restrictions are cooperative contracts, not an OS sandbox. Never put secrets into checkpoint feedback or chat.
-
-Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Artem Litvinko. Before public release, inspect the exact tracked files and dependency provenance. This package contains no run artifacts or personal host paths. No remote repository, commit, push or publication is created by setup.
+Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Artem Litvinko.
