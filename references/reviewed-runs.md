@@ -110,7 +110,7 @@ Subscriptions persist as `pi-reviewed-run` custom session entries. Reopening the
 
 `/pi-ping-pong-status`, `/reviewed-status`, and `/ppp-status` are equivalent names registered to one handler. They show current-project named runs plus locally attached explicit-path runs; they do not launch/restart workers, create config, run evaluators, or call models. Check `launcher.log` if launch fails. `dispatching` without a terminal delivery acknowledgement is ambiguous: inspect the Pi transcript before manual recovery, never automatically resend.
 
-Before registration, the receiver uses Pi's supported `getCommands()` API and skips names already owned by an extension, prompt, or skill, with a warning. Pi omits built-in TUI commands from that list; check the `/` command menu for possible built-in conflicts. A skipped command is not intercepted.
+The receiver registers commands in its factory without calling runtime-only APIs such as `getCommands()`, which throws before Pi binds the runtime. Pi's native resolver disambiguates duplicate extension names with numbered invocation names (for example `/ppp:1` and `/ppp:2`), rather than silently choosing an owner. Check the `/` menu for the available names and prompt/built-in conflicts. Skills use separate `/skill:<name>` commands. Receiver tests load the actual extension through Pi's uninitialized loader and exercise native duplicate-name resolution without model calls.
 
 For Codex-free operation, results and human questions return to the launching Pi session. Codex mobile Remote is not a Pi UI; access to that Pi terminal/session requires the user's existing terminal/remote setup.
 

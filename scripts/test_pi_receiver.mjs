@@ -5,13 +5,25 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const require = createRequire(process.env.PI_PACKAGE_JSON || path.join(os.homedir(), '.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/package.json'));
+const packageJson = process.env.PI_PACKAGE_JSON || path.join(os.homedir(), '.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/package.json');
+const require = createRequire(packageJson);
 const { createJiti } = require('jiti');
 const jiti = createJiti(import.meta.url);
 const module = await jiti.import(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../extensions/pi-reviewed.ts'));
 const extension = module.default ?? module;
+const packageRoot = path.dirname(packageJson);
+const { loadExtensions } = await import(pathToFileURL(path.join(packageRoot, 'dist/core/extensions/loader.js')).href);
+const { ExtensionRunner } = await import(pathToFileURL(path.join(packageRoot, 'dist/core/extensions/runner.js')).href);
+const receiverPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../extensions/pi-reviewed.ts');
+const loaded = await loadExtensions([receiverPath], process.cwd());
+assert.deepEqual(loaded.errors, [], 'real Pi loader must accept the receiver before runtime initialization');
+assert.equal(loaded.extensions.length, 1);
+assert.throws(() => loaded.runtime.getCommands(), /not initialized/, 'loader smoke test must use an unbound runtime');
+for (const name of ['pi-ping-pong', 'reviewed-run', 'ppp', 'pi-ping-pong-status', 'reviewed-status', 'ppp-status']) {
+  assert.ok(loaded.extensions[0].commands.has(name), `${name} must register during real extension loading`);
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-ping-pong-test-'));
 const projectPath = path.join(root, 'project');
 const childMarker = path.join(root, 'fake-child-started');
@@ -84,7 +96,7 @@ const ctx = {
 const pi = {
   on: (name, handler) => hooks.set(name, handler),
   registerCommand: (name, command) => commands.set(name, command),
-  getCommands: () => [],
+  getCommands: () => { throw new Error('Extension runtime not initialized'); },
   sendMessage: (message, options) => messages.push({ message, options }),
   sendUserMessage: (message, options) => userMessages.push({ message, options }),
   appendEntry: (...args) => entries.push(args),
@@ -315,7 +327,7 @@ try {
   const envelope = { id: 'one', run_id: 'Test-run', session_id: 'Test-session', kind: 'review', message: 'Codex checkpoint: read evidence', receipt: path.join(legacyRoot, 'receipt.txt') };
   write(path.join(legacyRoot, 'pi-inbox', '001.message.json'), envelope);
   await hooks.get('session_start')({}, ctx);
-  assert.ok(notices.some(notice => notice[0].includes('pi.getCommands()')), 'command registration preflight is explicitly reported');
+  assert.equal(commands.size, 6, 'all aliases remain registered after session start');
   assert.equal(messages.length, 1);
   assert.ok(commands.has('pi-ping-pong-status') && commands.has('reviewed-status') && commands.has('ppp-status'));
   assert.equal(messages[0].options.deliverAs, 'followUp');
@@ -382,21 +394,17 @@ try {
   assert.equal(fs.readdirSync(storage).filter(name => fs.existsSync(path.join(storage, name, 'launch-attempt.json'))).length, launchesBeforeMenuBack, 'menu run selection followed by Back never launches');
   assert.deepEqual(fs.readdirSync(storage).sort(), snapshotBeforeMenuBack, 'menu detail inspection does not mutate runs');
 
-  const conflictingCommands = new Map();
-  const conflictHooks = new Map();
-  const conflictPi = {
-    getCommands: () => [{ name: 'ppp', source: 'extension' }],
-    on: (name, handler) => conflictHooks.set(name, handler),
-    registerCommand: (name, command) => conflictingCommands.set(name, command),
-    sendMessage() {}, sendUserMessage() {}, appendEntry() {},
+  const receiver = loaded.extensions[0];
+  const conflictingExtension = {
+    ...receiver,
+    path: 'Test-conflicting-extension',
+    commands: new Map([['ppp', { ...receiver.commands.get('ppp'), extensionPath: 'Test-conflicting-extension' }]]),
   };
-  extension(conflictPi);
-  assert.equal(conflictingCommands.has('ppp'), false, 'an existing command found by Pi API is not intercepted');
-  assert.equal(conflictingCommands.has('pi-ping-pong'), true, 'non-conflicting launcher remains available');
-  assert.equal(conflictingCommands.has('ppp-status'), true, 'only the colliding command is skipped');
-  await conflictHooks.get('session_start')({}, { ...ctx, sessionManager: { getSessionId: () => 'Test-session', getEntries: () => [] } });
-  assert.ok(notices.at(-1)[0].includes('/ppp'), 'collision warning identifies skipped command');
-  await conflictHooks.get('session_shutdown')();
+  const runner = new ExtensionRunner([receiver, conflictingExtension], loaded.runtime, project, {}, {});
+  const resolvedCommands = runner.getRegisteredCommands();
+  assert.equal(resolvedCommands.some(command => command.invocationName === 'ppp'), false, 'Pi does not silently choose one colliding alias');
+  assert.deepEqual(resolvedCommands.filter(command => command.name === 'ppp').map(command => command.invocationName), ['ppp:1', 'ppp:2'], 'native Pi resolver disambiguates extension collisions');
+  assert.ok(runner.getCommand('pi-ping-pong'), 'non-conflicting primary command remains available');
 
   const installerSource = path.join(root, 'install-source');
   const installSkill = path.join(installerSource, 'skill');

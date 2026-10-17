@@ -100,7 +100,7 @@ Named runs live under `.pi-ping-pong/runs/<name>/`. The folder name is safe lowe
 
 After launch, the worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within configured limits.
 
-Pi's supported `getCommands()` API is checked before command registration; an already-registered extension/prompt/skill name is skipped with a warning rather than intercepted. Pi does not expose built-in TUI commands through that API, so inspect the `/` menu for built-in conflicts. `/reviewed-run` and `/reviewed-status` remain compatible aliases.
+Commands register during extension loading, without calling runtime-only APIs. Pi resolves duplicate extension command names with numbered invocation names (for example, `/ppp:1` and `/ppp:2`); inspect the `/` menu for the available names and any prompt or built-in conflicts. Skill commands use the separate `/skill:<name>` form. `/reviewed-run` and `/reviewed-status` remain compatible aliases.
 
 ## Quick start: reviewer in Codex
 

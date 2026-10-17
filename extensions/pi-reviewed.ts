@@ -278,13 +278,9 @@ function isExplicitPath(argument: string) {
 }
 
 export default function reviewedRuns(pi: ExtensionAPI) {
-  const commandNames = ['pi-ping-pong', 'reviewed-run', 'ppp', 'pi-ping-pong-status', 'reviewed-status', 'ppp-status'];
-  const existingCommandNames = new Set(pi.getCommands().map(command => command.name));
-  const commandConflicts = commandNames.filter(name => existingCommandNames.has(name));
   let context: ExtensionContext | undefined;
   let bindings: Binding[] = [];
   let timer: ReturnType<typeof setInterval> | undefined;
-  let commandCollisionNoticeShown = false;
   const warned = new Set<string>();
   function receiver(binding: Binding, connected: boolean) {
     atomic(path.join(binding.root, 'pi-receiver.json'), { run_id: binding.runId, session_id: binding.sessionId, connected, pid: process.pid });
@@ -354,11 +350,6 @@ export default function reviewedRuns(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     clear();
     context = ctx;
-    if (!commandCollisionNoticeShown) {
-      const skipped = commandConflicts.length ? ` Not registered because another resource already owns: ${commandConflicts.map(name => `/${name}`).join(', ')}.` : '';
-      ctx.ui.notify(`Pi Ping Pong checks pi.getCommands() before registering aliases.${skipped} Pi's command list omits built-in TUI commands; inspect the / command menu for those possible conflicts.`, commandConflicts.length ? 'warning' : 'info');
-      commandCollisionNoticeShown = true;
-    }
     const id = ctx.sessionManager.getSessionId();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== 'custom' || entry.customType !== entryType) continue;
@@ -503,7 +494,6 @@ export default function reviewedRuns(pi: ExtensionAPI) {
   }
 
   for (const command of ['pi-ping-pong', 'reviewed-run', 'ppp']) {
-    if (commandConflicts.includes(command)) continue;
     pi.registerCommand(command, {
       description: command === 'ppp' ? 'Short alias for /pi-ping-pong.' : command === 'reviewed-run' ? 'Compatibility alias for /pi-ping-pong.' : 'Open runs, prepare a named run, or launch an existing run/config.',
       handler: startReviewedRun,
@@ -536,7 +526,6 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     ctx.ui.notify(lines.join('\n'), 'info');
   };
   for (const command of ['pi-ping-pong-status', 'reviewed-status', 'ppp-status']) {
-    if (commandConflicts.includes(command)) continue;
     pi.registerCommand(command, {
       description: command === 'ppp-status' ? 'Short alias for /pi-ping-pong-status.' : command === 'reviewed-status' ? 'Compatibility alias for /pi-ping-pong-status.' : 'List local named and attached reviewed-run status; no model calls.',
       handler: showReviewedStatus,
