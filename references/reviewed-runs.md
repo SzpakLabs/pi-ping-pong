@@ -1,6 +1,6 @@
 # Reviewed run setup
 
-Use an isolated run directory on the host that owns Pi and can reach the target Codex app-server. Keep private artifacts out of Git, e.g. a project's ignored `data/raw/<run-id>/`. Both agents must see the same paths.
+For manual setup (advanced), use an isolated run directory on the host that owns Pi and can reach the target Codex app-server. Keep private artifacts out of Git, e.g. a project's ignored `data/raw/<run-id>/`. Both agents must see the same paths.
 
 Create `TASK.md`, an independent task-specific `eval.py` outside worker outputs, and `config.json`. The bridge creates `work/`, `reviews/`, `sessions/` and the protocol contract. Task output paths are relative to `work/`. Never put secrets in prompts, checkpoints or review feedback.
 
@@ -82,17 +82,19 @@ Tests: `python3 scripts/test_bridge.py` beside the bridge exercises transport/ro
 
 ## Pi reviewer transport
 
-The same bridge supports `review_transport=pi`; Codex remains the default for existing configs. No `thread_id` is needed for Pi. Do not invent `pi_session_id`: `/pi-ping-pong` binds the launching session itself; `/reviewed-run` is its equivalent compatibility alias.
+The same bridge supports `review_transport=pi`; Codex remains the default for existing configs. No `thread_id` is needed for Pi. Do not invent `pi_session_id`: `/pi-ping-pong` binds the launching session itself; `/reviewed-run` is its compatibility alias to the same handler.
 
 The source receiver is `../extensions/pi-reviewed.ts`. Install a copy in `~/.pi/agent/extensions/pi-reviewed.ts` for automatic discovery, then `/reload` in an existing Pi. For a one-off session, `pi -e /absolute/path/pi-reviewed.ts` loads it explicitly. Keep the installed copy in sync with the skill source. No global Pi Goal settings or vendor npm packages are changed.
 
-Prepare the same TASK.md, eval.py and config.json with explicit worker/reviewer models and finite bounds. In the Pi session, select its configured review_model, then run the primary launcher command:
+In Pi, `/pi-ping-pong` with no arguments sends a preparation prompt into the current conversation through Pi's `sendUserMessage` API. It reuses details already present, asks only for missing information, and suggests the currently selected reviewer model; the worker model must be explicitly chosen. This is a prompt-based preparation flow, not a fully automatic wizard. It prepares `TASK.md`, `config.json`, and an independent task-specific `eval.py` under the private default path `~/.pi/reviewed-runs/<UUID>/`, outside the source project. Review the resulting criteria, paths, models, evaluator, and finite limits, then explicitly invoke `/pi-ping-pong /absolute/run/config.json` to launch. Preparation itself does not create launch or session-attachment state. `/pi-ping-pong-status` and `/reviewed-status` show only locally attached launched runs, never drafts.
+
+For the advanced manual-config workflow, prepare TASK.md, eval.py and config.json with explicit worker/reviewer models and finite bounds. In the Pi session, select its configured review_model, then run the primary launcher command:
 
 ```
 /pi-ping-pong /absolute/run/config.json
 ```
 
-`/reviewed-run /absolute/run/config.json` remains a compatible alias to the same command handler and checks. Both commands require an existing `config.json`; neither generates configuration from free-form task text.
+`/reviewed-run` remains a compatible alias to the same handler: without arguments it enters the same preparation flow, and with `/absolute/run/config.json` it uses the existing-config launcher checks. The explicit-path form requires an existing `config.json`; manual config generation remains an advanced workflow.
 
 This starts the bridge as a detached child and returns immediately. A parent model must not wait synchronously for the bridge to finish. It watches the run-local durable `pi-inbox/` and injects each checkpoint using `pi.sendMessage` with `deliverAs: followUp` and `triggerTurn: true`. While the reviewer is busy, Pi queues the message for after current work. This is not an urgent steering interruption. While idle, a new review turn starts. Custom messages remain visibly distinguishable from human prompts.
 
@@ -104,7 +106,7 @@ Subscriptions persist as `pi-reviewed-run` custom session entries. Reopening the
 
 For Codex-free operation, results and human questions return to the launching Pi session. Codex mobile Remote is not a Pi UI; access to that Pi terminal/session requires the user's existing terminal/remote setup.
 
-Tests: `python3 -B scripts/test_bridge.py` covers both transport contracts and original Codex behavior. `node scripts/test_pi_receiver.mjs` exercises the real TypeScript receiver using a fake ExtensionAPI without model usage; it uses the installed Pi package's jiti loader. Live two-model/RPC runs are additional evidence, not implied by these unit tests.
+Tests: `python3 -B scripts/test_bridge.py` covers both transport contracts and original Codex behavior. `node scripts/test_pi_receiver.mjs` exercises the real TypeScript receiver using a fake ExtensionAPI without model usage; it uses the installed Pi package's jiti loader. These tests verify preparation-prompt wiring, not the quality of an evaluator generated during a live preparation. Live two-model/RPC runs are additional evidence, not implied by these unit tests.
 
 ## Compact checkpoint evidence
 

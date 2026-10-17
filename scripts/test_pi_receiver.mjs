@@ -12,14 +12,41 @@ const jiti = createJiti(import.meta.url);
 const module = await jiti.import(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../extensions/pi-reviewed.ts'));
 const extension = module.default ?? module;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-receiver-test-'));
+const childMarker = path.join(os.tmpdir(),`pi-preparation-child-${process.pid}`);
+const fakeBridge = path.join(root,'fake-bridge.py');
+fs.writeFileSync(fakeBridge,`from pathlib import Path\nPath(${JSON.stringify(childMarker)}).write_text('spawned')\n`);
+const previousBridge=process.env.PI_PING_PONG_BRIDGE;
+process.env.PI_PING_PONG_BRIDGE=fakeBridge;
 const write = (name, data) => fs.writeFileSync(path.join(root, name), JSON.stringify(data));
 const get = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
-const hooks = new Map(), commands = new Map(), messages = [], notices = [];
+const hooks = new Map(), commands = new Map(), messages = [], userMessages = [], entries = [], notices = [];
 const entry = { type: 'custom', customType: 'pi-reviewed-run', data: { root, runId: 'Test-run', sessionId: 'Test-session' } };
-const ctx = { model: { id: 'Sol', provider: 'Test' }, sessionManager: { getSessionId: () => 'Test-session', getEntries: () => [entry] }, ui: { notify: (...x) => notices.push(x) } };
-const pi = { on: (name, handler) => hooks.set(name,handler), registerCommand: (name, command) => commands.set(name,command), sendMessage: (message, options) => messages.push({message,options}), appendEntry: () => {} };
+const ctx = { model: { id: 'Sol', provider: 'Test' }, cwd: root, isIdle: () => true, sessionManager: { getSessionId: () => 'Test-session', getEntries: () => [entry] }, ui: { notify: (...x) => notices.push(x) } };
+const pi = { on: (name, handler) => hooks.set(name,handler), registerCommand: (name, command) => commands.set(name,command), sendMessage: (message, options) => messages.push({message,options}), sendUserMessage: (message, options) => userMessages.push({message,options}), appendEntry: (...args) => entries.push(args) };
 extension(pi);
 try {
+  const filesBeforePreparation=fs.readdirSync(root).sort();
+  const noticesBeforePreparation=notices.length;
+  await commands.get('pi-ping-pong').handler('',ctx);
+  assert.equal(userMessages.length,1,'no-argument command must send a preparation prompt');
+  const preparation=userMessages[0].message;
+  for (const requirement of ['task and independently checkable acceptance criteria','mode: Goal or Ralph','worker provider and exact model','the user must choose','reviewer provider/model','Test/Sol','exact allowed filesystem paths','max_cycles, cycle_seconds, review_seconds, and wall_seconds','unique private run directory','~/.pi/reviewed-runs','UUID run_id','TASK.md, config.json, and eval.py','do not invent or write pi_session_id','actual project outputs/state, not the worker\'s checkpoint or self-report','return nonzero','Do not start or launch the worker','create launch-attempt.json','/pi-ping-pong <actual-config-path>']) {
+    assert.ok(preparation.includes(requirement),`preparation prompt must specify ${requirement}`);
+  }
+  assert.equal(userMessages[0].options,undefined,'idle preparation should trigger normally without queueing');
+  assert.equal(messages.length,0,'preparation must not send a custom worker message');
+  assert.equal(entries.length,0,'preparation must not attach a run entry');
+  assert.deepEqual(fs.readdirSync(root).sort(),filesBeforePreparation,'preparation must not create run artifacts before resolving missing inputs');
+  assert.equal(notices.length,noticesBeforePreparation,'preparation must not announce a launched worker');
+  assert.equal(fs.existsSync(path.join(root,'launch-attempt.json')),false);
+  assert.equal(fs.existsSync(path.join(root,'pi-receiver.json')),false);
+  assert.equal(fs.existsSync(childMarker),false,'preparation must not spawn a child process');
+
+  const filesBeforeBadPath=fs.readdirSync(root).sort();
+  await assert.rejects(commands.get('pi-ping-pong').handler(path.join(root,'missing','config.json'),ctx),/Config not found:.*Run \/pi-ping-pong without arguments/);
+  await assert.rejects(commands.get('pi-ping-pong').handler('a task description',ctx),/Expected \/pi-ping-pong.*without arguments/);
+  assert.deepEqual(fs.readdirSync(root).sort(),filesBeforeBadPath,'bad explicit paths must not create config or run state');
+
   fs.mkdirSync(path.join(root,'pi-inbox'));
   write('config.json',{run_id:'Test-run',mode:'goal',review_transport:'pi',pi_session_id:'Test-session',review_model:'Sol',review_provider:'Test'});
   const envelope = { id:'one',run_id:'Test-run',session_id:'Test-session',kind:'review',message:'Codex checkpoint: read evidence',receipt:path.join(root,'receipt.txt') };
@@ -89,8 +116,21 @@ try {
     fs.unlinkSync(path.join(root,'launch-attempt.json'));
   }
   assert.equal(get('pi-inbox/003.delivery.json').status,'rejected_identity','identity refusal remains active');
-  console.log('Pi receiver: launcher alias parity, duplicate refusal, model/identity checks, delivery, reload and session switch passed.');
+
+  fs.rmSync(path.join(root,'bridge-status.json'));
+  fs.rmSync(path.join(root,'launch-attempt.json'),{force:true});
+  await commands.get('pi-ping-pong').handler(path.join(root,'config.json'),ctx);
+  assert.ok(fs.existsSync(path.join(root,'launch-attempt.json')),'an existing config should follow the normal launcher path');
+  for(let attempt=0;attempt<50 && !fs.existsSync(childMarker);attempt++) await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(fs.existsSync(childMarker),true,`existing config path should spawn the configured bridge process: ${fs.readFileSync(path.join(root,'launcher.log'),'utf8')}`);
+  assert.equal(entries.length,1,'only a real launch should attach the run entry');
+  assert.equal(get('config.json').pi_session_id,'Test-session','the launcher binds the current session only at launch');
+  assert.equal(get('config.json').review_transport,'pi');
+  assert.ok(notices.some(x=>x[0].startsWith('Started Test-run')),'successful existing-config launch keeps its Started notification');
+  console.log('Pi receiver: preparation-only flow, existing-config launch, aliases, status, duplicate/model/session checks and delivery passed.');
 } finally {
   await hooks.get('session_shutdown')();
   fs.rmSync(root,{recursive:true,force:true});
+  fs.rmSync(childMarker,{force:true});
+  if (previousBridge===undefined) delete process.env.PI_PING_PONG_BRIDGE; else process.env.PI_PING_PONG_BRIDGE=previousBridge;
 }

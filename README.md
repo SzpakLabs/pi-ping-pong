@@ -1,6 +1,14 @@
 # Pi Ping Pong
 
-> **TL;DR:** A worker performs the task; a reviewer checks each result and returns concrete feedback. Install this skill and receiver → run `/reload` in Pi → ask an agent to prepare a bounded run and `config.json` → run `/pi-ping-pong <actual-config-path>`. The config must exist first: this command launches a prepared run; it does not turn arbitrary task text into a config. See the [full Pi quick start](#quick-start-reviewer-in-pi).
+> **TL;DR:** Install or update the receiver, then in Pi:
+>
+> ```text
+> /reload
+> /pi-ping-pong
+> /pi-ping-pong-status
+> ```
+>
+> `/reload` loads receiver changes. `/pi-ping-pong` sends a preparation prompt to the current model; it gathers only missing details and prepares a run for you to inspect. The worker starts only when you later run `/pi-ping-pong <actual-config-path>`. `/pi-ping-pong-status` shows launched runs attached to this session, not drafts. Prepared runs default to the private `~/.pi/reviewed-runs/<UUID>/` directory. See the [full Pi quick start](#quick-start-reviewer-in-pi).
 >
 > **Goal lifecycle status:** A lifecycle fix is covered by deterministic fake-RPC regression tests. A new live Goal run has not been performed, so Goal routing is not live-verified.
 
@@ -73,12 +81,9 @@ The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiv
 
 ## Quick start: reviewer in Pi
 
-1. In your Pi session, ask the agent to prepare a bounded run. Example **request to the agent** (edit to suit your task):
-
-   > Prepare a Pi Ping Pong run for **[task]**. Use **[Goal or Ralph]**, worker model **[available model ID]**, reviewer model **[available model ID]**, and these acceptance criteria: **[criteria]**. Choose finite cycle and time limits. Create a private run directory containing `TASK.md`, `config.json`, and an independent eval. Do not start the run yet; show me the actual config path and limits.
-
-2. Review the generated task, criteria, and limits. Select the configured reviewer model in Pi.
-3. In Pi, use these primary commands:
+1. In the current Pi conversation, provide the task and any known acceptance criteria, project, and allowed paths. After installing or updating the receiver, use `/reload` if Pi is already open.
+2. Run `/pi-ping-pong` without arguments. It sends a preparation prompt to the current Pi model, which reuses supplied details and asks only for missing information. The current reviewer model is suggested as the reviewer default; the worker model must be chosen explicitly. This is a prompt-based preparation flow, not a fully automatic wizard.
+3. Review the prepared task, evaluator, models, allowed paths, limits, and actual config path. Preparation does not start the worker. In Pi, use these primary commands:
 
    ```text
    /pi-ping-pong <actual-config-path>
@@ -92,8 +97,10 @@ The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiv
    /reviewed-status
    ```
 
-   `/reviewed-run` is equivalent to `/pi-ping-pong`; `/reviewed-status` is equivalent to `/pi-ping-pong-status`. The config path is a placeholder: `config.json` must already exist. Status commands only inspect locally attached run status; they do not start a worker or call a model.
-4. The worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.
+   `/reviewed-run` is equivalent to `/pi-ping-pong`; `/reviewed-status` is equivalent to `/pi-ping-pong-status`. The config path is a placeholder: `config.json` must already exist. Status commands only inspect locally attached launched runs; they do not list drafts, start a worker, or call a model. The default private preparation directory is `~/.pi/reviewed-runs/<UUID>/`.
+4. After inspecting the preparation and explicitly running `/pi-ping-pong <actual-config-path>`, the worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.
+
+Manual config preparation and bridge invocation remain available as an advanced workflow; see the [run contract](references/reviewed-runs.md).
 
 ## Quick start: reviewer in Codex
 
