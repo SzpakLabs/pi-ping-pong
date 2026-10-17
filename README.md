@@ -17,6 +17,8 @@ Pi Ping Pong coordinates a **worker** and a separate **reviewer** around bounded
 
 This replaces manually copying worker summaries, files, and review notes between agent sessions. It routes compact checkpoints to the reviewer; it does not copy full worker logs into the review request.
 
+See the [development roadmap](ROADMAP.md) for proposed milestones, acceptance gates, and current evidence limits.
+
 ## Example workflow
 
 For example, a worker adds tests, the independent eval runs them, a reviewer checks the changes and eval evidence, and sends concrete corrections back to the worker. The worker makes the next bounded revision and submits another checkpoint. This describes the workflow, **not a live run**. Choose model IDs available and authenticated in your own environment; names used in examples are not required model IDs.
