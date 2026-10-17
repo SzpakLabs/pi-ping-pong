@@ -11,7 +11,7 @@
 >
 > `/ppp` opens the current project's runs menu, or asks for a name if there are none. A new name reserves a private directory and prepares the task/config/eval without starting the worker. Reusing that name after preparation is the explicit launch action if the run is ready; a previously launched run shows status and is never launched again. See the [full Pi quick start](#quick-start-reviewer-in-pi).
 >
-> **Goal lifecycle status:** A lifecycle fix is covered by deterministic fake-RPC regression tests. A new live Goal run has not been performed, so Goal routing is not live-verified.
+> **Goal lifecycle status:** Regression tests and a live three-cycle Goal run verified checkpoint delivery, reviewer feedback, continuation, and final completion in the current development environment. This does not establish compatibility with other versions or environments.
 
 Pi Ping Pong coordinates a **worker** and a separate **reviewer** around bounded Goal or Ralph work. The worker changes files; the reviewer checks the result and a fresh, independent evaluation (eval), then returns specific feedback. The worker can continue or revise within configured cycle and time limits.
 
@@ -83,6 +83,10 @@ python3 scripts/install.py
 ```
 
 The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiver to `~/.pi/agent/extensions/pi-reviewed.ts`; differing existing files are backed up. In Pi, run `/reload` to load the receiver in an existing session. **Do not load a second copy of this receiver alongside the installed copy.** The installer does not install Goal/Ralph vendor packages or configure credentials.
+
+## Development checks
+
+From the repository root, install development dependencies with `npm ci` and `uv sync --locked`. Run `npm run check` before real launches or commits; it runs lint, TypeScript checking, Ruff, and both protocol/receiver tests, collecting all command failures. An optional pre-commit hook runs the same gate. Opt in locally with `git config --local core.hooksPath .githooks`; the installer does not configure Git.
 
 ## Quick start: reviewer in Pi
 

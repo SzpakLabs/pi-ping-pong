@@ -9,3 +9,10 @@ data/
 .pi-ping-pong/
 *.log
 node_modules/
+.venv/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
+*.tsbuildinfo

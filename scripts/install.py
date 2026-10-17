@@ -24,12 +24,23 @@ def main():
             shutil.copy2(dst, backup)
         shutil.copy2(src, dst)
 
+    tooling_files = {
+        'package.json',
+        'package-lock.json',
+        'pyproject.toml',
+        'uv.lock',
+        'tsconfig.json',
+    }
     if source != target:
         for src in source.rglob('*'):
             relative = src.relative_to(source)
-            if any(part in {'.git', '__pycache__', 'node_modules', 'runs', 'data', '.pi-ping-pong'} for part in relative.parts):
+            if any(part in {'.git', '__pycache__', 'node_modules', '.venv', '.ruff_cache', '.mypy_cache', '.pytest_cache', 'dist', 'build', 'runs', 'data', '.pi-ping-pong'} for part in relative.parts):
                 continue
-            if src.is_file() and (src.suffix in {'.md', '.py', '.mjs', '.ts', '.yaml'} or src.name in {'.gitignore', 'LICENSE'}):
+            if src.is_file() and (
+                src.suffix in {'.md', '.py', '.mjs', '.ts', '.yaml'}
+                or src.name in {'.gitignore', 'LICENSE'}
+                or relative.as_posix() in tooling_files | {'scripts/check.sh', '.githooks/pre-commit'}
+            ):
                 copy_file(src, target / relative)
     receiver = args.extensions_dir.expanduser().resolve() / 'pi-reviewed.ts'
     copy_file(source / 'extensions/pi-reviewed.ts', receiver)
