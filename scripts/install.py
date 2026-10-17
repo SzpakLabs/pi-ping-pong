@@ -27,7 +27,7 @@ def main():
     if source != target:
         for src in source.rglob('*'):
             relative = src.relative_to(source)
-            if any(part in {'.git', '__pycache__', 'node_modules', 'runs', 'data'} for part in relative.parts):
+            if any(part in {'.git', '__pycache__', 'node_modules', 'runs', 'data', '.pi-ping-pong'} for part in relative.parts):
                 continue
             if src.is_file() and (src.suffix in {'.md', '.py', '.mjs', '.ts', '.yaml'} or src.name in {'.gitignore', 'LICENSE'}):
                 copy_file(src, target / relative)

@@ -1,14 +1,15 @@
 # Pi Ping Pong
 
-> **TL;DR:** Install or update the receiver, then in Pi:
+> **TL;DR:** Install or update the receiver, then use Pi. Replace `<run-name>` with your chosen lowercase kebab-case name; do not type the angle brackets.
 >
 > ```text
 > /reload
-> /pi-ping-pong
-> /pi-ping-pong-status
+> /ppp
+> /ppp <run-name>
+> /ppp-status
 > ```
 >
-> `/reload` loads receiver changes. `/pi-ping-pong` sends a preparation prompt to the current model; it gathers only missing details and prepares a run for you to inspect. The worker starts only when you later run `/pi-ping-pong <actual-config-path>`. `/pi-ping-pong-status` shows launched runs attached to this session, not drafts. Prepared runs default to the private `~/.pi/reviewed-runs/<UUID>/` directory. See the [full Pi quick start](#quick-start-reviewer-in-pi).
+> `/ppp` opens the current project's runs menu, or asks for a name if there are none. A new name reserves a private directory and prepares the task/config/eval without starting the worker. Reusing that name after preparation is the explicit launch action if the run is ready; a previously launched run shows status and is never launched again. See the [full Pi quick start](#quick-start-reviewer-in-pi).
 >
 > **Goal lifecycle status:** A lifecycle fix is covered by deterministic fake-RPC regression tests. A new live Goal run has not been performed, so Goal routing is not live-verified.
 
@@ -41,16 +42,20 @@ Model review complements eval; it does not replace it. A zero exit code is not p
 
 ## Requirements
 
-- A POSIX host, Python 3.10+, Node.js, and the `pi` CLI with RPC support. The bridge uses POSIX `fcntl` and process groups; native Windows support is not implemented.
+- A POSIX host, Python, Node.js, and the `pi` CLI with RPC support. The bridge uses POSIX `fcntl` and process groups; native Windows support is not implemented.
+- A reviewer/supervisor session in either Pi or Codex. Configure the reviewer provider/model separately from the application or CLI: **Codex is the application/CLI hosting a reviewer session, not a model ID.** Codex is not required for the Pi-only review route.
 - Pi Goal and Ralph extensions installed on the host. The bridge defaults to the packages below; they are not bundled. It expects `/goal`, `goal_wait`, `goal_complete`, and `/ralph`. You can configure an extension path in the run config.
 
-| Component | Current development environment | Upstream |
-|---|---:|---|
-| Pi | 1.3.0 | [Pi](https://github.com/earendil-works/pi) |
-| Goal | `@narumitw/pi-goal` 0.54.11 | [Package source](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-goal) |
-| Ralph | `@lnilluv/pi-ralph-loop` 2.1.0 | [Package source](https://github.com/lnilluv/pi-ralph-loop) |
+| Component | Minimum requirement established here | Current development environment | Upstream |
+|---|---|---:|---|
+| Python | 3.9+ (the bridge uses `pathlib.Path.is_relative_to`, available since Python 3.9); POSIX required | 3.15.0a1 (alpha) | [Python](https://www.python.org/) |
+| Node.js | 22.19.0+ (Pi package and installed core dependencies declare `engines.node >=22.19.0`) | v26.6.0 | [Pi](https://github.com/earendil-works/pi) |
+| Pi CLI | RPC-capable; no minimum CLI version is established here | 1.3.0 | [Pi](https://github.com/earendil-works/pi) |
+| Codex CLI | No minimum version established; `codex queue` must exist and work for the target session | `codex-cli 0.156.1` | [Codex CLI](https://developers.openai.com/codex/cli/) |
+| Goal | No minimum version established | `@narumitw/pi-goal` 0.54.11 | [Package source](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-goal) |
+| Ralph | No minimum version established | `@lnilluv/pi-ralph-loop` 2.1.0 | [Package source](https://github.com/lnilluv/pi-ralph-loop) |
 
-These are versions present in the current development environment, not recommendations, a compatibility guarantee, or a claim that the packages were tested together. **The Goal lifecycle fix is covered by deterministic regression tests; no new live Goal run has been performed, so the route is not live-verified.** Pi's versioned npm install syntax is `pi install npm:<package>@<version>`; for example:
+Minimums above are based on APIs used by this code or installed package `engines` metadata; the right column records versions observed in the current development environment, not minimums. Other versions and combinations are not claimed compatible. For Codex review, check `codex queue --help` on the host: the bridge calls `codex queue --thread ... --model ... --message ...`, and a version string alone does not establish that subcommand or target-session access. **The Goal lifecycle fix is covered by deterministic regression tests; no new live Goal run has been performed, so the route is not live-verified.** Pi's versioned npm install syntax is `pi install npm:<package>@<version>`; for example:
 
 ```sh
 pi install npm:@narumitw/pi-goal@0.54.11
@@ -81,26 +86,21 @@ The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiv
 
 ## Quick start: reviewer in Pi
 
-1. In the current Pi conversation, provide the task and any known acceptance criteria, project, and allowed paths. After installing or updating the receiver, use `/reload` if Pi is already open.
-2. Run `/pi-ping-pong` without arguments. It sends a preparation prompt to the current Pi model, which reuses supplied details and asks only for missing information. The current reviewer model is suggested as the reviewer default; the worker model must be chosen explicitly. This is a prompt-based preparation flow, not a fully automatic wizard.
-3. Review the prepared task, evaluator, models, allowed paths, limits, and actual config path. Preparation does not start the worker. In Pi, use these primary commands:
+1. In the Pi conversation, provide the task and any known acceptance criteria, project, and allowed paths. After installing/updating the receiver, run `/reload` in an existing session.
+2. Run `/pi-ping-pong` (short alias `/ppp`). With existing project runs, a native menu lists their local states and offers **Create a new run**. With no runs, Pi asks for a readable name. Project root is the Git top-level; outside Git, Pi asks you to confirm the current folder or the private fallback.
+3. Replace `<run-name>` with your chosen lowercase kebab-case name; do not type the angle brackets. Run `/ppp <run-name>` for a new name. It reserves `<project-root>/.pi-ping-pong/runs/<run-name>/` privately, then sends a preparation prompt to the current model. The model reuses the conversation and asks only for missing inputs; this is prompt-based preparation, not a fully automatic wizard. Choose the worker provider/model explicitly. The name identifies the run and is not its task description. Preparation writes no config placeholder and does not start or attach a worker. Review the generated TASK, independent evaluator, config, paths, models, and finite limits.
+4. After preparation, run `/ppp <run-name>` again to explicitly launch that same name if it is ready, or select it in the menu and choose **Launch**. A previously launched run shows status and is never launched again; use another name for new work. Menu row selection alone never launches. The explicit config-path form is also supported as an advanced route below.
+5. Use `/pi-ping-pong-status` (short alias `/ppp-status`) to inspect local named project runs and runs attached to this Pi session. `/reviewed-status` remains an equivalent alias. Status/menu inspection does not call models or run the evaluator.
 
-   ```text
-   /pi-ping-pong <actual-config-path>
-   /pi-ping-pong-status
-   ```
+Named runs live under `.pi-ping-pong/runs/<name>/`. The folder name is safe lowercase ASCII kebab-case (up to 48 characters); `config.json` contains a separate unique UUID `run_id`. The receiver creates the run directory with mode 0700 and its draft marker with mode 0600; preparation must keep TASK/config/eval files mode 0600. This repository ignores `.pi-ping-pong/`. In another Git project, add `.pi-ping-pong/` to that project's `.gitignore` first; preparation refuses to save if Git does not ignore the run path. Outside a Git project, choose and confirm the current folder or explicitly confirm the private fallback at `~/.pi/reviewed-runs/named/<name>/`. Existing legacy runs in `~/.pi/reviewed-runs/<UUID>/` remain untouched and can still be launched by explicit path.
 
-   Compatible older names with identical behavior:
+### Advanced: launch an existing config by path
 
-   ```text
-   /reviewed-run <actual-config-path>
-   /reviewed-status
-   ```
+`/pi-ping-pong <path>/config.json` accepts an existing absolute or Pi-working-directory-relative path; `/reviewed-run` uses the same handler. A nonexistent explicit path is an error, never a request to create a named run. Legacy runs outside the project directory are not migrated. The shared launcher retains its model/session binding and duplicate-launch refusal.
 
-   `/reviewed-run` is equivalent to `/pi-ping-pong`; `/reviewed-status` is equivalent to `/pi-ping-pong-status`. The config path is a placeholder: `config.json` must already exist. Status commands only inspect locally attached launched runs; they do not list drafts, start a worker, or call a model. The default private preparation directory is `~/.pi/reviewed-runs/<UUID>/`.
-4. After inspecting the preparation and explicitly running `/pi-ping-pong <actual-config-path>`, the worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.
+After launch, the worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within configured limits.
 
-Manual config preparation and bridge invocation remain available as an advanced workflow; see the [run contract](references/reviewed-runs.md).
+Pi's supported `getCommands()` API is checked before command registration; an already-registered extension/prompt/skill name is skipped with a warning rather than intercepted. Pi does not expose built-in TUI commands through that API, so inspect the `/` menu for built-in conflicts. `/reviewed-run` and `/reviewed-status` remain compatible aliases.
 
 ## Quick start: reviewer in Codex
 
@@ -117,13 +117,21 @@ Manual config preparation and bridge invocation remain available as an advanced 
 
    Confirm the run reports a running worker before ending the launch turn. The Codex reviewer receives a queued checkpoint in the configured existing chat, reviews the eval and evidence, then records a decision; the bridge returns that decision to the worker. `codex queue` availability and target-chat access are required as described above.
 
+## Review from your phone with Codex Remote
+
+When the supported Codex Remote/mobile workflow exposes the configured existing Codex chat, a Pi worker and bridge running on a connected host can send a checkpoint to that chat. The reviewer in that session checks the checkpoint and evidence, then returns a decision; genuine access questions or material choices are returned there too. See OpenAI's [Codex on mobile](https://learn.chatgpt.com/docs/mobile) and [Remote connections](https://learn.chatgpt.com/docs/remote-connections) documentation for the product's connection prerequisites; configure remote access and authentication separately, following the current official guidance. This README does not provide a setup procedure or guarantee that a particular session is exposed remotely.
+
+The phone does not start the host's local Pi processes by itself. The host must stay powered on, reachable, and awake; remote access can stop if the host or app is unavailable. Queue delivery does not replace independent evidence review or the configured evaluator. A Pi-only reviewer session does not become available through Codex Remote automatically. Cycle/time limits, duplicate-launch rules, and other run budgets still apply.
+
 ## Limits and safety
 
 - Runs have finite cycle and time limits. Exhaustion is not success. Automatic crash recovery is not implemented; inspect saved state before any explicitly authorized recovery.
 - Ask a person only for a real missing input/access, required approval, or material choice. Do not invent approval, request secrets in chat, or silently reset limits.
-- Keep configs, sessions, logs, screenshots, receipts, tokens, and customer data outside this repository. Runtime scope restrictions are cooperative, not an OS sandbox.
+- Keep private run artifacts outside tracked source/Git. The project's ignored `.pi-ping-pong/` run directory is allowed; keep secrets, sessions, logs, screenshots, receipts, tokens, and customer data out of tracked files and never commit them. Runtime scope restrictions are cooperative, not an OS sandbox.
 - The worker and reviewer need shared filesystem visibility; keep the host online/available. Ambiguous delivery must be inspected rather than automatically resent.
 - Running a task does not grant permission to commit, push, deploy, or publish.
+
+**Claude Code / Claude remote workflows:** planned investigation; not implemented or validated.
 
 ## Development and validation
 
