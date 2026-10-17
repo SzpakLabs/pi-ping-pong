@@ -145,16 +145,21 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       handler: startReviewedRun,
     });
   }
-  pi.registerCommand('reviewed-status', {
-    description: 'Show reviewed runs attached to this Pi session without starting model work.',
-    handler: async (_args, ctx) => {
-      for (const binding of bindings) {
-        try {
-          const state = read<{ status: string; cycle: number }>(path.join(binding.root, 'bridge-status.json'));
-          ctx.ui.notify(`${binding.runId}: ${state.status}, cycle ${state.cycle}. ${binding.root}`, 'info');
-        } catch { ctx.ui.notify(`${binding.runId}: starting or unavailable. ${binding.root}`, 'warning'); }
-      }
-      if (!bindings.length) ctx.ui.notify('No reviewed runs attached to this session.', 'info');
-    },
-  });
+  const showReviewedStatus = async (_args: string, ctx: ExtensionContext) => {
+    for (const binding of bindings) {
+      try {
+        const state = read<{ status: string; cycle: number }>(path.join(binding.root, 'bridge-status.json'));
+        ctx.ui.notify(`${binding.runId}: ${state.status}, cycle ${state.cycle}. ${binding.root}`, 'info');
+      } catch { ctx.ui.notify(`${binding.runId}: starting or unavailable. ${binding.root}`, 'warning'); }
+    }
+    if (!bindings.length) ctx.ui.notify('No reviewed runs attached to this session.', 'info');
+  };
+  for (const command of ['pi-ping-pong-status', 'reviewed-status']) {
+    pi.registerCommand(command, {
+      description: command === 'pi-ping-pong-status'
+        ? 'Show reviewed runs attached to this Pi session without starting model work.'
+        : 'Compatibility alias for /pi-ping-pong-status.',
+      handler: showReviewedStatus,
+    });
+  }
 }

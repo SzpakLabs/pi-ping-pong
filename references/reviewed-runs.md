@@ -82,7 +82,7 @@ Tests: `python3 scripts/test_bridge.py` beside the bridge exercises transport/ro
 
 ## Pi reviewer transport
 
-The same bridge supports `review_transport=pi`; Codex remains the default for existing configs. No `thread_id` is needed for Pi. Do not invent `pi_session_id`: `/reviewed-run` binds the launching session itself.
+The same bridge supports `review_transport=pi`; Codex remains the default for existing configs. No `thread_id` is needed for Pi. Do not invent `pi_session_id`: `/pi-ping-pong` binds the launching session itself; `/reviewed-run` is its equivalent compatibility alias.
 
 The source receiver is `../extensions/pi-reviewed.ts`. Install a copy in `~/.pi/agent/extensions/pi-reviewed.ts` for automatic discovery, then `/reload` in an existing Pi. For a one-off session, `pi -e /absolute/path/pi-reviewed.ts` loads it explicitly. Keep the installed copy in sync with the skill source. No global Pi Goal settings or vendor npm packages are changed.
 
@@ -100,7 +100,7 @@ This starts the bridge as a detached child and returns immediately. A parent mod
 
 Subscriptions persist as `pi-reviewed-run` custom session entries. Reopening the same session restores mailbox monitoring; switching to another session does not inherit it. Shutdown disposes timers, marks the receiver offline and leaves pending inbox files durable. Already-running workers remain governed by existing deadlines; they do not receive automatic approval while the reviewer is offline. Do not relaunch a run just to restore its receiver.
 
-`/reviewed-status` prints attached run status without paid model calls. Check `launcher.log` if launch fails. `dispatching` without a terminal delivery acknowledgement is ambiguous: inspect the Pi transcript before manual recovery, never automatically resend.
+`/pi-ping-pong-status` and `/reviewed-status` are equivalent names registered to one handler. Both print locally attached run status only; they do not launch or restart workers, create config, or call models. Check `launcher.log` if launch fails. `dispatching` without a terminal delivery acknowledgement is ambiguous: inspect the Pi transcript before manual recovery, never automatically resend.
 
 For Codex-free operation, results and human questions return to the launching Pi session. Codex mobile Remote is not a Pi UI; access to that Pi terminal/session requires the user's existing terminal/remote setup.
 

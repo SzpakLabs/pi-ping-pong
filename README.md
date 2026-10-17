@@ -78,15 +78,21 @@ The installer copies the skill to `~/.agents/skills/pi-ping-pong` and the receiv
    > Prepare a Pi Ping Pong run for **[task]**. Use **[Goal or Ralph]**, worker model **[available model ID]**, reviewer model **[available model ID]**, and these acceptance criteria: **[criteria]**. Choose finite cycle and time limits. Create a private run directory containing `TASK.md`, `config.json`, and an independent eval. Do not start the run yet; show me the actual config path and limits.
 
 2. Review the generated task, criteria, and limits. Select the configured reviewer model in Pi.
-3. In Pi, run the **slash command** with the actual path created in step 1 (the path below is a placeholder, not a pre-existing file):
+3. In Pi, use these primary commands:
 
    ```text
-   /pi-ping-pong <actual-run-directory>/config.json
+   /pi-ping-pong <actual-config-path>
+   /pi-ping-pong-status
    ```
 
-   `/reviewed-run <actual-run-directory>/config.json` remains a compatible alias for the same launcher.
+   Compatible older names with identical behavior:
 
-   `/reviewed-status` shows attached run status without starting model work.
+   ```text
+   /reviewed-run <actual-config-path>
+   /reviewed-status
+   ```
+
+   `/reviewed-run` is equivalent to `/pi-ping-pong`; `/reviewed-status` is equivalent to `/pi-ping-pong-status`. The config path is a placeholder: `config.json` must already exist. Status commands only inspect locally attached run status; they do not start a worker or call a model.
 4. The worker runs in a separate Pi RPC session. Checkpoints return as follow-up messages to the launching reviewer session. The reviewer examines the request and evidence; the bridge delivers its decision to the worker. Repeat only within the configured limits.
 
 ## Quick start: reviewer in Codex
