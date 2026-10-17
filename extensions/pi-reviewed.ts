@@ -49,6 +49,7 @@ function regularPrivateRunFile(runDir: string, file: string) {
 }
 function validRunName(name: string) { return name.length <= maxRunNameLength && runNamePattern.test(name); }
 function displayValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value !== 'string') return '—';
   const safe = value.replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, 160);
   return /(?:\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9_]{12,}|\bbearer\s+\S+|(?:api[_-]?key|secret|token)\s*[:=])/i.test(safe) ? '[redacted]' : safe;

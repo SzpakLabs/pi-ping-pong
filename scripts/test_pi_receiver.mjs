@@ -232,6 +232,21 @@ try {
   assert.equal(userMessages.length, modelCallsBeforeMenu, 'run menu is local and does not call a model');
   assert.ok(selectCalls.some(call => call.options.some(option => option.includes(readyInfoText))), `menu lists ready run name, state, mode and worker: ${JSON.stringify({ selectCalls, notices })}`);
 
+  const stoppedPrefix = makeRun('test-prefix', { status: 'attention_required' });
+  const readyPrefix = makeReadyRun('test-prefix-2');
+  const noticeStart = notices.length;
+  selectAnswers.push((_title, options) => options.find(option => option.startsWith('test-prefix-2 —')), 'Back');
+  await runCommand('ppp');
+  const selectedNotices = notices.slice(noticeStart).map(notice => notice[0]);
+  assert.ok(selectedNotices.some(text => text.includes(`Directory: ${readyPrefix}`) && text.startsWith('test-prefix-2: ready to launch')), 'selecting the longer name must not inspect the stopped prefix run');
+  assert.equal(selectedNotices.some(text => text.includes(`Directory: ${stoppedPrefix}\n`)), false);
+  assert.ok(selectedNotices.some(text => text.includes('Limits: cycles=3, cycle_seconds=60, review_seconds=120, wall_seconds=600')), 'numeric limits must be visible in run details');
+  assert.equal(fs.existsSync(path.join(readyPrefix, 'launch-attempt.json')), false, 'inspection does not launch the ready run');
+  const stoppedNoticeStart = notices.length;
+  await runCommand('ppp', 'test-prefix');
+  assert.ok(notices.slice(stoppedNoticeStart).some(notice => notice[0].startsWith('test-prefix: attention required')), 'explicit old name shows only its own stopped status');
+  assert.equal(fs.existsSync(childMarker), false, 'inspecting a stopped run never starts a worker');
+
   const menuCreatedBefore = userMessages.length;
   selectAnswers.push('＋ Create a new run');
   inputAnswers.push('menu-run');
