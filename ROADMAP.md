@@ -1,10 +1,12 @@
-# Pi Ping Pong — Development Roadmap v6
+# Pi Ping Pong — Development Roadmap v7
 
-Date: 2026-10-17
+Date: 2026-10-18
 
 Status: development plan with an agreed product-priority addendum; implementation and release status are separate.
 
-This is the canonical repository roadmap. It preserves v5's consolidation of the user-supplied v4 roadmap and its addenda, and records the product priorities agreed in the 2026-10-17 conversation. Agreement on this plan does not authorize milestone implementation, paid live runs, commits, publication, deployment, or changes to external systems. Policy choices marked proposed require resolution before the affected implementation.
+Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) records the desired component boundaries, state ownership and extension rules. This roadmap owns delivery order and milestone gates; the architecture document does not mark planned work implemented or reorder agreed priorities.
+
+This is the canonical repository roadmap. It preserves v5's consolidation of the user-supplied v4 roadmap and its addenda, records the product priorities agreed in the 2026-10-17 conversation, and adds Trusted Artifact Generation on 2026-10-18. Agreement on this plan does not authorize milestone implementation, paid live runs, commits, publication, deployment, or changes to external systems. Policy choices marked proposed require resolution before the affected implementation.
 
 ## Mission and product boundary
 
@@ -14,14 +16,16 @@ Pi Ping Pong is a lightweight, model-agnostic supervision layer over existing Pi
 
 ```text
 Task + authorized scope + acceptance criteria
-  → Pi worker (Goal / Ralph)
-  → checkpoint + artifacts
+  → Pi worker (Goal / Ralph): implementation + substantive report
+  → PPP controller: trusted checkpoint envelope + source manifest
   → fresh independent eval + supervisor review
   → continue | revise | complete | wait_human | stop
   → result delivered to the originating session where supported
 ```
 
 Core remains headless and usable without a dashboard, AG-UI, backend service, database, or cloud hosting. Goal and Ralph share one protocol; their runtime lifecycle differences remain inside the existing implementation.
+
+Controller-generated artifacts in this target flow are planned, not an assertion of current implementation.
 
 ## Current baseline and evidence limits
 
@@ -45,11 +49,50 @@ The following requirements and relative priorities were agreed in conversation. 
 
 | Order | Deliverable | Agreed priority / boundary |
 |---|---|---|
-| 1 | Confirmed launch report, persistent Pi status, readable detailed status; graceful and forced stop; simpler package installation; run archiving and deletion | Nearest delivery slice. These controls do not depend on the optional dashboard. |
+| 0 | Trusted Artifact Generation | P0 baseline hardening within v0.2a. Remove model-authored technical identity and manifests from the checkpoint path; preserve rejection and independent acceptance gates. |
+| 1 | Confirmed launch report, persistent Pi status, readable detailed status and compact managing-chat callbacks; graceful and forced stop; simpler package installation; run archiving and deletion | Nearest delivery slice. These controls do not depend on the optional dashboard. |
 | 2 | One execution followed by fresh eval and independent review (`single`) | Next execution mode; no automatic fix/retry cycle. |
 | 3 | Easier skill entry / possible `pi-ping-pong-light` (`pppl`); feature spec-run | Follow-on work. Light skill has medium priority. Start spec-run with one feature and sequential tasks. |
 | 4 | External spec readers and broader product orchestration | Extend the feature workflow after its contract is verified. |
 | 5 | Claude CLI integration | Low priority; separate worker, reviewer and return-to-existing-chat compatibility evidence. |
+
+The 2026-10-18 planning addition prioritizes trusted artifacts before final integration of the current status feature. It does not accept that feature, reopen a stopped run, renew its limits, or adopt the accompanying analysis's other proposed priority changes. The remaining delivery order stays as recorded above.
+
+### Trusted Artifact Generation — P0, baseline hardening / v0.2a
+
+**Problem and evidence boundary.** Current dogfooding exposed a checkpoint containing a directory name instead of the run UUID and a source manifest containing a shortened base commit ID. Rejecting invalid identity is correct supervisor behavior; it does not establish feature completion. Startup has independent acceptance evidence; footer behavior has test evidence but the affected checkpoint was rejected. Final status, notifications, documentation and integration remain unaccepted. These observations motivate this work; they do not prove unattended execution, recovery or cost savings.
+
+**Scope.** Extend the existing bridge/controller with a small deterministic artifact-generation path. Do not create another runtime, protocol, acceptance authority or large subsystem. A run-local helper is an experiment until the shared implementation and compatibility tests establish support.
+
+| Responsibility | Owner / trusted input |
+|---|---|
+| Implementation, tests, documentation and substantive explanation | Worker; reports and requested completion remain untrusted claims. |
+| `run_id`, cycle identity (`cycle` / `cycle_id`), `base_commit` / existing base-revision field | Controller-owned run configuration and lifecycle state; record the full object ID obtained from Git, without assuming one hash algorithm or accepting an abbreviation. |
+| Source hashes, source manifest and checkpoint envelope | Deterministic controller code over the declared source snapshot and authorized scope, including relevant untracked files. |
+| Fresh criterion checks and acceptance evidence | Independent evaluator using protected task, criteria and evaluator versions. |
+| Substantive findings and `continue` / `revise` / `complete` / `wait_human` / `stop` | Independent reviewer within existing policy and evidence gates. |
+
+The worker supplies its report and declared artifact references through a narrow input contract. It does not serialize or repair authoritative run/cycle/base identity, calculate authoritative hashes, or certify acceptance. Existing CLI/config/checkpoint fields remain compatible through the shared implementation or an explicit documented adapter/migration.
+
+**Generation and rejection contract**
+
+- Derive identity only from controller-owned state; validate run, current cycle, base revision, allowed paths and required files before emitting an envelope. A worker-provided conflicting identity must be rejected explicitly, never silently rebound to the current run. Apply the same checks to legacy/model-authored inputs during migration.
+- Snapshot or freeze the evaluated source state; include the complete declared source changes and relevant untracked files. Bind manifest and envelope to that state and protected acceptance inputs. Detect changes between generation, evaluation and final decision; invalidate stale evidence instead of accepting a mixture of revisions.
+- Publish artifacts atomically with private permissions. Define duplicate invocation and crash behavior: an identical retry may return the same artifact; a conflicting or partial write must not replace a valid envelope or create another cycle. Hashing alone does not establish filesystem isolation or trustworthy provenance; retain the v0.2a enforcement boundary below.
+- Reject wrong run identity, stale cycles, wrong base revision, changed hashes, missing artifacts and out-of-scope paths with an actionable reason. Preserve rejected evidence and the original run history; never edit an old checkpoint to make it pass or use generation as implicit approval.
+- Preserve finite cumulative limits and duplicate-launch refusal. Artifact generation grants no new worker turn, recovery attempt, scope, commit permission or external action. A valid envelope and passing deterministic checks remain necessary but insufficient for verified completion.
+
+**Experiment: Trusted Checkpoint.** Compare the existing validation path with controller-generated artifacts on a fixed synthetic fixture set: valid checkpoint; wrong `run_id`; stale cycle; wrong base commit; missing source artifact; modified artifact hash. Include scope violations, duplicate generation and interrupted writes as regression cases for the shared implementation. Use fresh deterministic checks; no paid model run is needed to generate or repair technical identity in this experiment.
+
+Acceptance criteria:
+
+1. Zero invalid or foreign checkpoint identities accepted; every negative fixture rejected for the intended reason without altering earlier evidence or binding it to another run.
+2. All valid fixture scenarios accepted by the artifact validator, including full Git object IDs and relevant untracked artifacts. Validator acceptance is separate from task acceptance.
+3. No scenario requires an LLM to create or correct authoritative identity, manifest or hashes. A missing substantive report may still require worker work within the existing bounds.
+4. Mutation, repeated invocation and crash fixtures cannot produce a valid envelope for stale/mixed state, overwrite a conflicting accepted record, duplicate execution or renew limits.
+5. Existing Goal/Ralph, CLI/config, decision identity and Pi session contracts pass compatibility tests, or the affected migration is documented and tested. Required protocol/receiver checks pass before an authorized live trial.
+
+Report protocol-invalid checkpoint counts and deterministic fixture results first. Measure cost/time improvements separately on comparable end-to-end tasks, including failed attempts and human effort; synthetic success does not prove general autonomy or cheaper operation.
 
 ### English interface and run visibility
 
@@ -59,6 +102,27 @@ The following requirements and relative priorities were agreed in conversation. 
 - Report launch accepted separately from worker/session startup confirmed. A spawned bridge PID is not proof of a running worker. Surface startup failure and timeout instead of leaving the user with silence. Read durable bridge state locally; show unavailable/stale information honestly. Emit chat reports for meaningful transitions, not continuous worker logs.
 - Example English labels: `working`, `evaluating`, `awaiting review`, `awaiting your input`, `stopping after current turn`, `stopped`, `force stopped`.
 
+### Compact managing-chat callbacks
+
+- Replace visible instruction walls with a compact English run summary: readable run name, Goal/Ralph mode, actual outcome/phase, cycle/limit when applicable, concrete reason and next action. Cover confirmed startup, review requested, verified completion, stopped/failed/limit reached and genuine human blockers. Keep the normal summary to approximately 4–6 short lines; use restrained status icons and formatting where supported, with a readable plain-text fallback.
+- Keep the machine control payload separate from its human presentation. Preserve exact run/cycle/hash identity, authorized review scope, evidence references, decision instructions and delivery receipts in controller-owned structured records. Use a supported host attachment/metadata channel or a short validated reference that the receiver/reviewer can resolve; do not assume every chat supports hidden payloads, cards or buttons. Unsupported presentation must not prevent delivery or review.
+- Do not place full UUIDs, absolute paths, raw logs or long operational instructions in the normal summary. Provide supported artifact/details links or an explicit details view for authorized access; retain full identity in those details. Never invent a working link or expose private artifacts through a public destination. Escape untrusted names/text for the target renderer.
+- Render known state and reason deterministically without an extra model call. Distinguish native completion from verified acceptance, remaining cycles from permission to resume, and `attention_required` from an actual human blocker. Show unknown/unavailable data explicitly. Use `Next:` for automatic review/diagnosis or a stopped outcome; show `Action required:` only for a real missing input, access, approval or choice. A callback or details link does not authorize restart, extra budget or scope expansion.
+- Reuse durable delivery receipts keyed to run and event/transition identity. Reload/reconnect/retry must not duplicate a delivered notification or drop a distinct cycle's review request; preserve existing callback routing and decision gates. Do not send a chat message on every status refresh.
+
+Illustrative stopped-run presentation; the reason must come from verified state:
+
+```text
+⚠ PPP · start-status-followup-luna · Ralph
+Stopped · cycle 4/6
+Reason: checkpoint run identity mismatch.
+Next: diagnose within authorized scope; no automatic restart.
+```
+
+Where supported, append a real `Details` link to the private run record. Review-request callbacks should instead state `Awaiting review` and identify the review cycle; the managing agent still receives or resolves the complete authorized review contract.
+
+Acceptance: fixtures cover every listed outcome, long names/narrow displays, unknown state, plain-text fallback, safe details resolution, exact control identity/scope preservation, and deduplication across reload/retry. Completion requires independent acceptance; a compact presentation must never conceal a blocking reason, bypass review or imply that the user must intervene when automatic work is authorized. This belongs to the current visibility/notification delivery slice and does not require the optional dashboard.
+
 ### User stop controls
 
 - Target commands: `/ppp-stop` and `/ppp-stop --force`; allow `/ppp-stop <name>` with the same force flag. Resolve the current run from the session; when multiple runs are eligible, require explicit selection rather than guessing.
@@ -66,6 +130,7 @@ The following requirements and relative priorities were agreed in conversation. 
 - If already waiting for review or human input, stop without waiting for a reply. If an evaluator is already running, prevent any subsequent work and settle or terminate it under the existing deadlines. Record terminal state only after owned execution is stopped.
 - Force stop interrupts active work without waiting for a turn boundary and terminates the run's owned worker/evaluator process groups and bridge execution. It must not stop the parent Pi/reviewer session, unrelated runs or processes based solely on an unverified stale PID. Verify process ownership and report termination failures.
 - Repeated stop is idempotent; force can escalate an outstanding graceful stop. A persisted stop takes precedence over queued or late reviewer decisions and survives reload/recovery without resuming work. Existing cycle/wall-time deadlines remain effective and are never renewed by stop.
+- Implement local durable stop intent in this control slice; full crash recovery remains v0.3. Safe stop must not depend on shipping the entire recovery engine.
 - Preserve artifacts, logs, identity and stop reason. A stopped run is not accepted/complete and cannot be silently replayed. Force stop can leave partial files and cannot undo already executed external actions; reflect that limit in its report. Stop is separate from deletion.
 
 ### Simpler installation
@@ -109,7 +174,7 @@ Versions are milestones, not calendar commitments. The v0.2 subdivisions are del
 | Version | Milestone | Scope | Exit evidence |
 |---|---|---|---|
 | v0.1 | Reconcile and verify the current harness | Inventory source/install versions; reconcile live-run claims; retain existing CLI, aliases, installer and MIT scope. Establish CI using the local check gate. | Fresh local and CI results; a compatibility table separating tested, untested and unsupported combinations; authorized live smoke evidence for each combination claimed supported. |
-| v0.2a | Trusted review and acceptance boundary | Enforce reviewer/worker permissions; protect task, criteria and evaluator; bind acceptance to the actual source state. Define risk and authorization policy. | Negative tests show forbidden writes fail; changed criteria/evaluator/source invalidate acceptance; unsupported isolation configurations cannot claim enforced protection. |
+| v0.2a | Trusted artifacts, review and acceptance boundary | Begin with deterministic identity, checkpoint envelope and source-manifest generation. Enforce reviewer/worker permissions; protect task, criteria and evaluator; bind acceptance to the actual source state. Define risk and authorization policy. | Trusted Checkpoint fixtures pass without model-authored identity; invalid identities and stale artifacts are rejected. Negative tests show forbidden writes fail; changed criteria/evaluator/source invalidate acceptance; unsupported isolation configurations cannot claim enforced protection. |
 | v0.2b | Review contract and structured events | Stable findings, evidence-backed closure, bounded convergence; minimal versioned run/event schema. Record model/usage data when available. | Findings survive cycles without duplicate churn; unresolved blockers prevent completion; event fixtures explain decisions and retain unknown usage values. |
 | v0.2c | Pilot benchmark and dogfooding | Small versioned task set comparing standalone and supervised Pi; start isolated dogfooding using a stable supervisor. | Repeated paired runs report completion, cost, time and human effort, including failures. Findings can show benefit, no benefit, or harm; no broad reliability claim from a small pilot. |
 | v0.3 | Durable execution and recovery | Build on existing records: crash-safe state transitions, restart/resume, idempotent dispatch/callback, stale/racing checkpoint handling, explicit uncertain outcomes. | Injected failures at persistence/dispatch boundaries recover without duplicating confirmed effects, replaying ambiguous effects, or resetting elapsed budgets. |
@@ -180,6 +245,7 @@ Define eligibility, exclusions, stopping rules and target thresholds before meas
 | Human minutes per task | Measured setup, intervention, review and approval time, with categories separated; escalation count is supplementary. |
 | Cost per verified task | All worker/reviewer and failed-attempt costs divided by verified completions. Report unknown costs; with zero completions, show total spend and no finite per-completion claim. |
 | Time and convergence | Time to verified completion, review latency, cycles, repeated/reopened findings and unresolved blockers. |
+| Artifact reliability and review effort | Protocol-invalid checkpoints by reason; valid/invalid fixture acceptance; reviewer time/tokens per cycle where available. Compare equivalent scopes and include retries; never count a valid envelope as a verified task. |
 | Reviewer accuracy | False positives and false negatives on independently labeled cases; disclose ambiguous labels and adjudication. |
 | Recovery and regressions | Recovery success under defined injected faults; rollback/revert rates where meaningful. |
 
@@ -201,6 +267,10 @@ Choose assistant libraries and hosting only after validating the specific integr
 
 Use a pinned stable Pi Ping Pong installation to develop the next version in an isolated branch/worktree. Keep the running supervisor and trusted acceptance gates immutable from the worker; keep candidate code separate. Gather private run/eval data for later observability and benchmarks.
 
+Use deterministic preflight for prerequisites and artifact validity before spending a worker/reviewer turn. Deliver stages with explicit criteria; record progress from authorized source diffs/hashes separately from a native runtime's service-directory tracking. Review relevant changes and unresolved findings using evidence bound to the current source state; reducing repeated context must not omit required independent review or regression checks.
+
+For the current incomplete feature, preserve the source diff, baseline, prior decisions and rejected checkpoints. Complete trusted artifact generation, then finish status/lifecycle, notifications/diagnostics, tests and documentation before final integration acceptance. Any authorized follow-up has its own recorded identity and an explicit link to earlier evidence. Recovery must retain the applicable cumulative cycle/time limits, including the original deadline when authorized only within remaining limits. A new budget requires explicit authorization; do not add cycles until tests happen to pass or describe a manual follow-up as automatic recovery. A bounded live dogfooding run follows deterministic checks only when separately authorized and needed for an unverified runtime behavior.
+
 Run `npm run check` before real launches or commits. Protocol/receiver changes also require the existing Python and Node test suites, covered by that gate. Live model runs need task authorization and separate evidence. Release changes need the applicable independent checks and human approval; an experimental worker must not overwrite the supervisor governing its work.
 
 Preserve CLI/config contracts, legacy skill aliases and Pi session entries. Document schema/config migrations and recovery compatibility. Install authorized runtime updates from this canonical directory; do not maintain divergent runtime implementations or patch vendor packages/global Goal/Ralph settings.
@@ -215,7 +285,16 @@ The v4 research references remain design inspirations: `wassname/pi-goals`, `tin
 
 Produce a verified v0.1 baseline record and a bounded v0.2a specification: supported environment, live evidence references, trusted-state boundary, permission mechanism, risk/authorization matrix, and negative-test acceptance criteria. Define the pilot comparison and minimal event fields before implementing v0.2. Resolve documented status conflicts from evidence; do not infer live success from tests or documentation.
 
-The agreed next product slice is launch/status visibility, graceful/forced stop, Pi package installation and archive/delete controls, followed by `single`. Specify their lifecycle, installation/migration and negative-test acceptance alongside that baseline work. Basic terminal visibility is not deferred until the optional v0.4 dashboard. Implementation order within the first slice may follow dependencies; the addendum does not authorize a live run, commit or release.
+The first baseline-hardening deliverable is a bounded Trusted Artifact Generation specification and Trusted Checkpoint fixture experiment within v0.2a. Then finish independent acceptance of launch/status visibility and continue the agreed control/install queue: graceful/forced stop, Pi package installation and archive/delete controls, followed by `single`. Specify their lifecycle, installation/migration and negative-test acceptance alongside that baseline work. Basic terminal visibility is not deferred until the optional v0.4 dashboard. This planning addition does not authorize a live run, commit or release.
+
+## Changes from v6
+
+- Added P0 Trusted Artifact Generation to baseline hardening / v0.2a, with explicit Worker, Controller, Evaluator and Reviewer responsibilities.
+- Defined deterministic identity/manifest generation, conflict rejection, source-state binding, atomic writes and compatibility requirements without claiming implemented protection.
+- Added the Trusted Checkpoint experiment, negative fixtures and measurable acceptance criteria; kept task acceptance and cost/autonomy claims separate.
+- Added compact English managing-chat callbacks with separate structured control records, private details access, deterministic rendering, durable deduplication and host-compatible fallback.
+- Recorded bounded follow-up dogfooding, source-based progress and deterministic-first checks; clarified that local durable stop intent precedes full v0.3 recovery.
+- Preserved the remaining agreed queue; other priority changes in the supplied analysis remain proposals.
 
 ## Changes from v5
 
