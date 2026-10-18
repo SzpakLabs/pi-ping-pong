@@ -57,6 +57,20 @@ for line in sys.stdin.buffer:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_bridge_status_keeps_start_and_update_timestamps_and_evaluation_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge = b.Bridge(dict(run_id='fixture-test', mode='ralph', root=str(root)))
+            started = bridge.state['started_at']
+            self.assertGreater(started, 0)
+            self.assertGreater(bridge.state['updated_at'], 0)
+            bridge.status('running', phase='evaluating', cycle=1)
+            state = b.read(root / 'bridge-status.json')
+            self.assertEqual(state['phase'], 'evaluating')
+            self.assertEqual(state['started_at'], started)
+            self.assertGreaterEqual(state['updated_at'], started)
+            self.assertEqual(state['cycle'], 1)
+
     def test_contract_separates_authorized_sources_from_evidence(self):
         for mode in ('goal', 'ralph'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
