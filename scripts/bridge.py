@@ -131,7 +131,7 @@ class Bridge:
         self.records = queue.Queue()
         self.deferred = queue.Queue()
         self.started = time.monotonic()
-        self.state = {'run_id': config['run_id'], 'mode': config['mode'], 'status': 'starting', 'cycle': 0}
+        self.state = {'run_id': config['run_id'], 'mode': config['mode'], 'status': 'starting', 'phase': 'starting', 'cycle': 0, 'started_at': time.time(), 'updated_at': time.time()}
         self.outstanding = set()
         self.events_file = self.root / 'bridge-events.jsonl'
         self.last_failure = None
@@ -142,7 +142,7 @@ class Bridge:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     def status(self, status, **fields):
-        self.state.update(status=status, **fields)
+        self.state.update(status=status, phase=fields.pop('phase', status), updated_at=time.time(), **fields)
         atomic(self.root / 'bridge-status.json', self.state)
         self.event('status', status=status, **fields)
 
@@ -345,6 +345,7 @@ Finish one logical deliverable/correction and save checkpoint.json. Missing outp
     def review(self):
         cycle = self.state['cycle']
         cp, snap = validate_checkpoint(self.c, cycle)
+        self.status('running', phase='evaluating', cycle=cycle)
         directory = self.root / 'reviews' / f'{cycle:03}'
         directory.mkdir(parents=True)
         stdout = directory / 'eval.stdout'
