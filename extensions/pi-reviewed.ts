@@ -50,6 +50,16 @@ function regularPrivateRunFile(runDir: string, file: string) {
   }
   return false;
 }
+function evaluatorPath(runDir: string, argv: unknown): { file?: string; error?: string } {
+  if (!Array.isArray(argv) || !argv.every(value => typeof value === 'string' && value.length > 0)) {
+    return { error: 'eval_argv must be a non-empty string array' };
+  }
+  let script: string | undefined;
+  if (argv.length === 2 && argv[0] === 'python3') script = argv[1];
+  else if (argv.length === 3 && argv[0] === 'python3' && argv[1] === '-B') script = argv[2];
+  else return { error: 'unsupported eval_argv; use ["python3", "<script>"] or ["python3", "-B", "<script>"]' };
+  return { file: path.resolve(runDir, 'work', script!) };
+}
 function validRunName(name: string) { return name.length <= maxRunNameLength && runNamePattern.test(name); }
 function generatedRunName(task: string) {
   const slug = task.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
@@ -190,16 +200,16 @@ function inspectRun(name: string, dir: string): RunInfo {
   const bounds = ['max_cycles', 'cycle_seconds', 'review_seconds', 'wall_seconds'].map(key => config[key]);
   const argv = config.eval_argv;
   const taskFile = typeof config.task === 'string' ? path.resolve(dir, config.task) : '';
-  const evalFile = Array.isArray(argv) && typeof argv[1] === 'string' ? path.resolve(dir, 'work', argv[1]) : '';
+  const evaluator = evaluatorPath(dir, argv);
   const incomplete: string[] = [];
   if (!requiredStrings.every(value => typeof value === 'string' && value.trim().length > 0)) incomplete.push('required config fields');
   if (!uuidPattern.test(String(config.run_id))) incomplete.push('UUID run_id');
   if (!['goal', 'ralph'].includes(String(config.mode))) incomplete.push('mode');
   if (!bounds.every(value => Number.isSafeInteger(value) && Number(value) > 0)) incomplete.push('positive finite bounds');
-  if (!Array.isArray(argv) || argv.length < 2 || !argv.every(value => typeof value === 'string' && value.length > 0)) incomplete.push('eval_argv');
+  if (evaluator.error) incomplete.push(evaluator.error);
   if (config.review_transport !== 'pi' || config.pi_session_id !== undefined || config.thread_id !== undefined) incomplete.push('unbound Pi config');
   if (!inside(dir, taskFile) || !regularPrivateRunFile(dir, taskFile)) incomplete.push('private TASK file');
-  if (!inside(dir, evalFile) || !regularPrivateRunFile(dir, evalFile)) incomplete.push('private evaluator file');
+  if (!evaluator.error && evaluator.file && (!inside(dir, evaluator.file) || !regularPrivateRunFile(dir, evaluator.file))) incomplete.push('private evaluator file');
   if (!regularPrivateFile(path.join(dir, 'config.json'))) incomplete.push('private config file');
   if (!incomplete.length) return { name, dir, state: 'ready to launch', mode, worker, reviewer, details: 'TASK, independent eval, UUID run_id, models and finite limits are present.', config };
   return { name, dir, state: 'draft/incomplete', mode, worker, reviewer, details: `Preparation is incomplete: ${incomplete.join(', ')}.`, config };

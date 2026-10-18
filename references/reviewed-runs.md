@@ -26,6 +26,15 @@ Example config (substitute actual authorized values, no guessed thread IDs):
 
 These are example limits, not permission to spend the full budget. Match limits to the task and human availability. A wait consumes wall time but no model polling. Goal's installed automatic-work/no-progress limits remain enabled. Do not enable managed-run RPC globally: direct `/goal` and Pi's documented RPC transport suffice. No token budget is invented by the bridge.
 
+For Pi preparation/readiness, `eval_argv` supports exactly these Python forms:
+
+```json
+["python3", "/absolute/run/eval.py"]
+["python3", "-B", "/absolute/run/eval.py"]
+```
+
+A script path may also be relative; it resolves from the run's `work/` directory, which is the bridge's execution working directory. No other interpreter, Python flag, or argument layout is inferred. Readiness checks the script path and private-file protections without executing it.
+
 Run:
 
 ```sh

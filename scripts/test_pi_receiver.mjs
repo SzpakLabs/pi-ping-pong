@@ -516,6 +516,51 @@ try {
   await assert.rejects(runCommand('ppp', missingPython), /already launched/);
   assert.equal(notices.length, noticesBeforeSpawnError + spawnNotices.length, 'duplicate launch refusal does not emit a second spawn report');
 
+  const evaluatorReadiness = (name, argv, evaluatorSetup) => {
+    const dir = makeRun(name, { config: null, launched: false });
+    write(path.join(dir, 'TASK.md'), 'Synthetic task criteria; no real user run.');
+    write(path.join(dir, 'eval.py'), `from pathlib import Path\\nPath(${JSON.stringify(childMarker)}).write_text('evaluator executed')\\n`, 0o600);
+    if (evaluatorSetup) evaluatorSetup(dir);
+    write(path.join(dir, 'config.json'), { ...tempConfig(dir), eval_argv: argv(dir) });
+    return dir;
+  };
+  evaluatorReadiness('test-python-absolute', dir => ['python3', path.join(dir, 'eval.py')]);
+  evaluatorReadiness('test-python-no-bytecode', dir => ['python3', '-B', path.join(dir, 'eval.py')]);
+  evaluatorReadiness('test-python-relative', dir => {
+    fs.mkdirSync(path.join(dir, 'work'), { mode: 0o700 });
+    write(path.join(dir, 'work', 'eval.py'), `from pathlib import Path\\nPath(${JSON.stringify(childMarker)}).write_text('evaluator executed')\\n`, 0o600);
+    return ['python3', 'eval.py'];
+  });
+  evaluatorReadiness('test-python-bad-b', dir => ['python3', path.join(dir, 'eval.py'), '-B']);
+  evaluatorReadiness('test-python-unsupported-flag', dir => ['python3', '-I', path.join(dir, 'eval.py')]);
+  evaluatorReadiness('test-python-missing', dir => ['python3', path.join(dir, 'missing.py')]);
+  evaluatorReadiness('test-python-non-private', dir => {
+    write(path.join(dir, 'eval.py'), 'raise SystemExit(1)');
+    fs.chmodSync(path.join(dir, 'eval.py'), 0o644);
+    return ['python3', path.join(dir, 'eval.py')];
+  });
+  evaluatorReadiness('test-python-symlink', dir => {
+    fs.rmSync(path.join(dir, 'eval.py'));
+    write(path.join(root, 'linked-eval.py'), 'raise SystemExit(1)');
+    fs.symlinkSync(path.join(root, 'linked-eval.py'), path.join(dir, 'eval.py'));
+    return ['python3', path.join(dir, 'eval.py')];
+  });
+  evaluatorReadiness('test-python-outside', () => ['python3', path.join(root, 'linked-eval.py')]);
+  const beforeEvaluatorInspection = userMessages.length;
+  await runCommand('pi-ping-pong-status');
+  const evaluatorStatus = notices.at(-1)[0];
+  for (const name of ['test-python-absolute', 'test-python-no-bytecode', 'test-python-relative']) {
+    assert.match(evaluatorStatus, new RegExp(`${name}: ready to launch`), `${name} must resolve the evaluator command to a private in-run file`);
+  }
+  for (const name of ['test-python-bad-b', 'test-python-unsupported-flag', 'test-python-missing', 'test-python-non-private', 'test-python-symlink', 'test-python-outside']) {
+    assert.match(evaluatorStatus, new RegExp(`${name}: draft/incomplete`), `${name} must not pass evaluator readiness`);
+  }
+  assert.ok(evaluatorStatus.includes('unsupported eval_argv; use ["python3", "<script>"] or ["python3", "-B", "<script>"]'), 'unsupported command diagnostics must show exact supported forms');
+  assert.ok(evaluatorStatus.includes('unsupported eval_argv'), 'unsupported flags receive an actionable command diagnostic');
+  assert.ok(evaluatorStatus.includes('private evaluator file'), 'missing, non-private, symlinked and outside-run evaluators fail the private-file check');
+  assert.equal(userMessages.length, beforeEvaluatorInspection, 'readiness inspection never calls a model');
+  assert.equal(fs.existsSync(childMarker), false, 'readiness inspection never executes evaluator code');
+
   const readyLaunch = makeReadyRun('ready-launch-run');
   await runCommand('pi-ping-pong', 'ready-launch-run');
   await waitForChild();
