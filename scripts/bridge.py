@@ -16,6 +16,25 @@ import time
 import uuid
 
 
+REPORT_GUIDANCE = '''Write a concise, self-contained callback report using these headings:
+Run summary; Steps; Verification and errors; Escalation; Completion; Next action.
+State what happened this checkpoint and the overall run state. Include completed
+steps, the fresh evaluator result, review findings/errors and whether anything
+was corrected or rerun. Say "None" for errors or escalation when none occurred;
+do not omit those sections. Distinguish verified completion from intermediate
+progress, stopped work, and unknown outcomes. Cite the run directory and the
+most relevant report/evidence paths. Do not claim checks or actions without
+recorded evidence.
+If user input is genuinely required, put the precise missing decision/input and
+why it blocks progress under Escalation, then give the exact requested action
+under Next action. If there are multiple valid choices, list at most three,
+briefly state each option's main benefit and cost/risk, and recommend one with
+reason. Separate actual approval/access requirements from ordinary preferences.
+If no user action is needed, say so explicitly and state the automatic next step
+or that the run is finished. Do not end by asking a vague question such as
+"suggest the actions" or asking the user to confirm routine work.'''
+
+
 def read(path):
     return json.loads(Path(path).read_text())
 
@@ -371,7 +390,7 @@ Finish one logical deliverable/correction and save checkpoint.json. Missing outp
 Read {directory / 'request.json'}, {self.c['task']}, and only listed evidence in {self.root / 'work'}. Read eval outputs; independently check the logical result. Do not load full Pi logs unless needed for a blocker. Worker is waiting, no dependent work will run yet.
 Return decision using: python3 {script} decide --config {self.root / 'config.json'} --cycle {cycle} --decision <continue|revise|complete|wait_human|stop> --feedback '<specific short feedback>'.
 continue=verified intermediate result, revise=repairable within existing scope, complete=all task requirements verified and eval exit0, wait_human=actual missing access/secret/approval/user choice. An exhausted budget or repeated identical failure needs a user-facing report. Iteration completed/exit0 is never success by itself. Missing initial outputs mean bootstrap, not automatic human escalation.
-If human action is required, write wait_human and ask the precise question here; do not fabricate approval or include secrets. Later, after the user's actual resolution, replace that decision with --human-resolved and continue/revise as appropriate. Otherwise finish automatic review without asking the human to confirm routine next steps. Only review; do not modify worker evidence, launch another Pi, navigate sites, or expand authorization. Do not disclose private raw outputs in chat. This callback was explicitly authorized by the user. Briefly report the review result in this chat.
+If human action is required, write wait_human and ask the precise question here; do not fabricate approval or include secrets. Later, after the user's actual resolution, replace that decision with --human-resolved and continue/revise as appropriate. Otherwise finish automatic review without asking the human to confirm routine next steps. Only review; do not modify worker evidence, launch another Pi, navigate sites, or expand authorization. Do not disclose private raw outputs in chat. This callback was explicitly authorized by the user. {REPORT_GUIDANCE}
 '''
         self.status('waiting_pi' if self.c['review_transport'] == 'pi' else 'waiting_codex', request=str(directory / 'request.json'))
         self.queue_message(message, directory / 'queue-receipt.txt')
@@ -437,14 +456,14 @@ If human action is required, write wait_human and ask the precise question here;
                     if not unchanged(self.c, request):
                         raise RuntimeError('Artifacts changed after final acceptance')
                     self.status('complete', reason=result['feedback'])
-                    self.queue_message(f'Pi/{self.c["mode"]} reviewed run {self.c["run_id"]} is complete. Read {self.root / "bridge-status.json"} and the latest review request/decision. Report verified outcome and paths briefly. Do not rerun anything.', self.root / 'final-queue-receipt.txt')
+                    self.queue_message(f'Pi/{self.c["mode"]} reviewed run {self.c["run_id"]} is complete. Read {self.root / "bridge-status.json"}, {self.root / "reviews" / f"{cycle:03}" / "request.json"}, {self.root / "reviews" / f"{cycle:03}" / "review.json"}, and relevant checkpoint/evidence. {REPORT_GUIDANCE} Do not rerun anything.', self.root / 'final-queue-receipt.txt')
                     return 0
                 feedback = result['feedback']
             raise RuntimeError('Cycle budget exhausted; human decision needed before further work')
         except Exception as error:
             self.status('attention_required', reason=str(error))
             try:
-                self.queue_message(f'Pi/{self.c["mode"]} run {self.c["run_id"]} stopped and needs attention. Read {self.root / "bridge-status.json"} and compact bridge-events.jsonl; inspect Pi session/stderr only if needed. Explain blocker/limit, ask only for required human action. Do not automatically restart or expand scope.', self.root / 'attention-queue-receipt.txt')
+                self.queue_message(f'Pi/{self.c["mode"]} run {self.c["run_id"]} stopped and needs attention. Read {self.root / "bridge-status.json"}, compact bridge-events.jsonl, and the latest available checkpoint/review/eval evidence; inspect Pi session/stderr only if needed. {REPORT_GUIDANCE} Explain the failure or exhausted limit, what is verified versus unknown, and ask only for required human action. Do not automatically restart or expand scope.', self.root / 'attention-queue-receipt.txt')
             except Exception as delivery:
                 self.event('attention.delivery_failed', reason=str(delivery))
             return 1

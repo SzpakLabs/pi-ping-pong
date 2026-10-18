@@ -79,6 +79,8 @@ Use `wait_human` for actual user action and ask a precise question in the chat. 
 
 For Goal, the decision is delivered into the same RPC session. Final `complete` lets it call `goal_complete`; for Ralph, the accepted decision either starts the next bounded iteration with feedback or ends the run. Finite cycle/time exhaustion does not become task success. A callback review must end its Codex turn after recording the decision, freeing the chat for the next checkpoint.
 
+Every run callback must be a self-contained summary with **Run summary**, **Steps**, **Verification and errors**, **Escalation**, **Completion**, and **Next action** sections. Report the current checkpoint and overall run state, fresh evaluator result, findings/errors, verified versus outstanding criteria, and relevant evidence paths; explicitly say when there are no errors or escalation. Never describe intermediate progress as complete. If user input is truly required, state exactly what is missing and why it blocks progress. Offer up to three concrete options when there is a genuine choice, briefly compare benefit and cost/risk, and recommend one. Otherwise say no user action is needed and name the automatic next step or that the run is finished. Avoid vague prompts to “suggest actions” or confirm routine work.
+
 ## Failure/recovery boundaries
 
 - Queue attempts are recorded before dispatch. Failed/ambiguous dispatch is not retried automatically; inspect receipts and target chat before any manual resend.

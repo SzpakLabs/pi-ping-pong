@@ -20,6 +20,11 @@ from pathlib import Path
 def emit(x): print(json.dumps(x),flush=True)
 if Path(sys.argv[0]).name=='codex':
  msg=sys.argv[sys.argv.index('--message')+1]
+ if 'reviewed run ' in msg and ' is complete.' in msg:
+  Path('final-callback-prompt.txt').write_text(msg);print('Queued final report');sys.exit(0)
+ if 'stopped and needs attention.' in msg:
+  Path('attention-callback-prompt.txt').write_text(msg);print('Queued attention report');sys.exit(0)
+ Path('review-callback-prompt.txt').write_text(msg)
  match=re.search(r'Read (.+?/reviews/\d+/request.json),',msg)
  if match:
   path=Path(match.group(1)); req=json.loads(path.read_text())
@@ -162,12 +167,24 @@ class ProtocolTests(unittest.TestCase):
                 if scenario=='stuck':
                     self.assertEqual(p.returncode,1,p.stderr.decode())
                     self.assertIn('Repeated identical',b.read(root/'bridge-status.json')['reason'])
+                    attention = (root / 'work/attention-callback-prompt.txt').read_text()
+                    self.assertIn('what is verified versus unknown', attention)
+                    self.assertIn('Escalation', attention)
                     continue
                 self.assertEqual(p.returncode, 0, p.stderr.decode())
                 self.assertEqual(b.read(root / 'bridge-status.json')['status'], 'complete')
                 self.assertEqual((root / 'work/result.txt').read_text(), 'PONG')
                 self.assertEqual(b.read(root / 'reviews/001/request.json')['eval']['exit_code'], 1)
                 self.assertEqual(b.read(root / 'reviews/002/request.json')['eval']['exit_code'], 0)
+                callback = (root / 'work/review-callback-prompt.txt').read_text()
+                final_callback = (root / 'work/final-callback-prompt.txt').read_text()
+                for heading in ('Run summary', 'Steps', 'Verification and errors', 'Escalation', 'Completion', 'Next action'):
+                    self.assertIn(heading, callback)
+                    self.assertIn(heading, final_callback)
+                self.assertIn('briefly state each option\'s main benefit and cost/risk', callback)
+                self.assertIn('Do not end by asking a vague question', callback)
+                self.assertIn('reviews/002/request.json', final_callback)
+                self.assertIn('reviews/002/review.json', final_callback)
                 events = [json.loads(x) for x in (root / 'bridge-events.jsonl').read_text().splitlines()]
                 self.assertEqual([x['decision'] for x in events if x['type'] == 'review.applied'], ['revise', 'complete'])
                 if scenario=='human':
