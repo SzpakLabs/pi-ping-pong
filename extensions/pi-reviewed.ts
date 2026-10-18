@@ -2,19 +2,22 @@ import { spawn, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 type Binding = { root: string; runId: string; sessionId: string };
 type Config = { run_id: string; review_model: string; review_provider?: string; [key: string]: unknown };
 type Envelope = { id: string; run_id: string; session_id: string; kind: string; message: string; receipt: string };
 type Project = { root: string; fallback: boolean; git: boolean };
-type RunState = 'draft/incomplete' | 'ready to launch' | 'running' | 'waiting review' | 'waiting human' | 'completed' | 'stopped' | 'attention required' | 'unknown/malformed';
+type RunState = 'draft/incomplete' | 'ready to launch' | 'starting' | 'running' | 'waiting review' | 'waiting human' | 'completed' | 'stopped' | 'attention required' | 'unknown/malformed';
 type RunInfo = { name: string; dir?: string; state: RunState; mode?: string; worker?: string; reviewer?: string; details?: string; config?: Config };
+type LaunchWatch = { root: string; runId: string; deadline: number; notified?: string };
+const statusKey = 'pi-ping-pong';
 const entryType = 'pi-reviewed-run';
 const maxRunNameLength = 48;
 const runNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const safeRunId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(value);
 const read = <T>(file: string): T => JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 function atomic(file: string, data: unknown) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
@@ -48,11 +51,20 @@ function regularPrivateRunFile(runDir: string, file: string) {
   return false;
 }
 function validRunName(name: string) { return name.length <= maxRunNameLength && runNamePattern.test(name); }
+function generatedRunName(task: string) {
+  const slug = task.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'task';
+  const suffix = createHash('sha256').update(task).digest('hex').slice(0, 8);
+  return `${slug.slice(0, maxRunNameLength - suffix.length - 1).replace(/-+$/g, '')}-${suffix}`;
+}
 function displayValue(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value !== 'string') return '—';
   const safe = value.replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, 160);
   return /(?:\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9_]{12,}|\bbearer\s+\S+|(?:api[_-]?key|secret|token)\s*[:=])/i.test(safe) ? '[redacted]' : safe;
+}
+function canonicalPath(value: string) {
+  try { return fs.realpathSync(value); } catch { return path.resolve(value); }
 }
 function inside(parent: string, child: string) {
   const relative = path.relative(parent, child);
@@ -133,7 +145,8 @@ async function resolveProject(ctx: ExtensionContext): Promise<Project | undefine
   }
 }
 function statusLabel(value: unknown): RunState | undefined {
-  if (value === 'running' || value === 'starting') return 'running';
+  if (value === 'running') return 'running';
+  if (value === 'starting') return 'starting';
   if (value === 'waiting_pi' || value === 'waiting_codex') return 'waiting review';
   if (value === 'waiting_human') return 'waiting human';
   if (value === 'complete') return 'completed';
@@ -242,15 +255,15 @@ function reserveRun(project: Project, name: string) {
 function draftFiles(dir: string) {
   return fs.readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile() && !entry.isSymbolicLink()).map(entry => entry.name).sort();
 }
-function preparationPrompt(project: Project, name: string, dir: string, continuation: boolean, reviewerDefault: string) {
+function preparationPrompt(project: Project, name: string, dir: string, continuation: boolean, reviewerDefault: string, taskDescription = '') {
   const files = continuation ? draftFiles(dir).filter(file => file !== '.draft.json') : [];
-  return `Prepare a Pi Ping Pong run from this conversation. Reuse all task details, criteria, project context, and decisions already provided; ask only concise grouped questions for missing information. The run name is an identifier, not a complete task description. Do not start or launch the worker during preparation.\n\nConfirmed project root: ${project.root}\nSelected run name: ${name}\nExact reserved private run directory: ${dir}\n${project.fallback ? 'This is the explicitly confirmed private fallback store; do not use the project cwd.' : ''}\n${continuation ? `This is an incomplete existing run. Existing entries (read each listed regular file into context before deciding whether any change is needed): ${files.length ? files.join(', ') : '(none)'}. Do not overwrite existing files blindly; preserve valid content and write only missing/verified updates. It has never been launched, and this preparation must not touch any launched run/evidence.` : 'This directory was exclusively reserved for this new run.'}\n\nWrite only this run's TASK.md, config.json, and independent task-specific eval.py inside the exact reserved directory above. Do not use another run directory, do not create run files elsewhere, and do not overwrite .draft.json. Use already supplied conversation data; if essential inputs remain missing, ask instead of writing placeholder/fake values. Confirm the project root and allowed filesystem paths with the user; only the approved target paths may be modified by the worker.\n\nThe prepared TASK.md must state the actual task and independently checkable acceptance criteria. config.json must contain a unique RFC 4122 UUID run_id (UUID is for run_id only; do not put a UUID in the folder name), mode goal|ralph, explicit user-chosen worker_provider and worker_model (never guess the worker model), reviewer provider and model (suggest ${reviewerDefault}, but confirm the exact provider/model), the task path, eval_argv invoking the evaluator by its absolute path, and positive finite integer max_cycles, cycle_seconds, review_seconds, and wall_seconds. Do not invent an eval that always succeeds. The independent evaluator must check actual task-specific outputs/state, map every acceptance criterion to a check, and return nonzero for unmet criteria; clarify criteria that cannot be independently evaluated. Use review_transport=pi. Do not write pi_session_id, create launch-attempt.json, or attach a session entry; the launcher binds the session only when explicitly launched.\n\nKeep all run artifacts private: directory mode 0700 and TASK.md, config.json, eval.py mode 0600. Ensure paths are inside this exact run directory except explicitly user-approved task target paths. Do not copy secrets. Do not run the worker, Goal/Ralph, bridge, evaluator, or paid model-backed checks as part of preparation.\n\nWhen ready, report the task, checkable criteria, mode, worker/reviewer provider and models, allowed paths, evaluator command and criterion mapping, finite limits, exact run directory and config path. State explicitly that no worker was started and give the explicit launch command \`/pi-ping-pong ${name}\`. If incomplete, report only missing inputs and preserve the draft for continuation.`;
+  return `Prepare a Pi Ping Pong run from this conversation. Reuse all task details, criteria, project context, and decisions already provided; ask only concise grouped questions for missing information. The run name is an identifier, not a complete task description. Do not start or launch the worker during preparation.\n\n${taskDescription ? `Task requested in the command: ${taskDescription}\n\n` : ''}Confirmed project root: ${project.root}\nSelected run name: ${name}\nExact reserved private run directory: ${dir}\n${project.fallback ? 'This is the explicitly confirmed private fallback store; do not use the project cwd.' : ''}\n${continuation ? `This is an incomplete existing run. Existing entries (read each listed regular file into context before deciding whether any change is needed): ${files.length ? files.join(', ') : '(none)'}. Do not overwrite existing files blindly; preserve valid content and write only missing/verified updates. It has never been launched, and this preparation must not touch any launched run/evidence.` : 'This directory was exclusively reserved for this new run.'}\n\nWrite only this run's TASK.md, config.json, and independent task-specific eval.py inside the exact reserved directory above. Do not use another run directory, do not create run files elsewhere, and do not overwrite .draft.json. Use already supplied conversation data; if essential inputs remain missing, ask instead of writing placeholder/fake values. Confirm the project root and allowed filesystem paths with the user; only the approved target paths may be modified by the worker.\n\nThe prepared TASK.md must state the actual task and independently checkable acceptance criteria. config.json must contain a unique RFC 4122 UUID run_id (UUID is for run_id only; do not put a UUID in the folder name), mode goal|ralph, worker_provider, worker_model, and thinking using the approved defaults unless the user explicitly requested alternatives, review_provider and review_model set to the current Pi model (${reviewerDefault}); use it without confirmation unless no model is selected or the user explicitly requests a different reviewer, the task path, eval_argv invoking the evaluator by its absolute path, and positive finite integer max_cycles, cycle_seconds, review_seconds, and wall_seconds. Unless the user requested different values, default worker_provider to openai-codex, worker_model to gpt-6-luna, thinking to low, and max_cycles to 10; these are approved defaults, so do not ask the user to confirm them. Use a different model or limit only when the user explicitly asks. Do not invent an eval that always succeeds. The independent evaluator must check actual task-specific outputs/state, map every acceptance criterion to a check, and return nonzero for unmet criteria; clarify criteria that cannot be independently evaluated. Use review_transport=pi. Do not write pi_session_id, create launch-attempt.json, or attach a session entry; the launcher binds the session only when explicitly launched.\n\nKeep all run artifacts private: directory mode 0700 and TASK.md, config.json, eval.py mode 0600. Ensure paths are inside this exact run directory except explicitly user-approved task target paths. Do not copy secrets. Do not run the worker, Goal/Ralph, bridge, evaluator, or paid model-backed checks as part of preparation.\n\nWhen ready, report the task, checkable criteria, mode, worker/reviewer provider and models, allowed paths, evaluator command and criterion mapping, finite limits, exact run directory and config path. State explicitly that no worker was started and give the explicit launch command \`/pi-ping-pong ${name}\`. If incomplete, report only missing inputs and preserve the draft for continuation.`;
 }
-function sendPreparation(pi: ExtensionAPI, ctx: ExtensionCommandContext, project: Project, name: string, dir: string, continuation: boolean) {
+function sendPreparation(pi: ExtensionAPI, ctx: ExtensionCommandContext, project: Project, name: string, dir: string, continuation: boolean, taskDescription = '') {
   try { verifyNamedRun(project, name, dir); }
   catch (error) { ctx.ui.notify(String(error), 'error'); return; }
   const reviewerDefault = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'no Pi model is selected';
-  const prompt = preparationPrompt(project, name, dir, continuation, reviewerDefault);
+  const prompt = preparationPrompt(project, name, dir, continuation, reviewerDefault, taskDescription);
   pi.sendUserMessage(prompt, ctx.isIdle() ? undefined : { deliverAs: 'followUp' });
   ctx.ui.notify(`Preparation prompt sent for ${name}; no worker was started. After preparation, explicitly launch with /pi-ping-pong ${name}.`, 'info');
 }
@@ -274,6 +287,51 @@ function details(info: RunInfo) {
 function formatRun(info: RunInfo) {
   return `${info.name} — ${info.state} — ${info.mode ?? 'mode unknown'} — ${info.worker ?? 'worker unknown'}`;
 }
+function detailedStatus(info: RunInfo, binding?: Binding) {
+  const root = info.dir ?? binding?.root;
+  const config = info.config;
+  let state: { run_id?: unknown; status?: unknown; phase?: unknown; cycle?: unknown; max_cycles?: unknown; started_at?: unknown; updated_at?: unknown; reason?: unknown } | undefined;
+  const validatedRunId = safeRunId(config?.run_id) && (!binding || (safeRunId(binding.runId) && binding.runId === config.run_id));
+  const validatedInfoState = ['running', 'starting', 'waiting review', 'waiting human', 'completed', 'stopped', 'attention required'].includes(info.state);
+  const invalidLifecycleIdentity = validatedInfoState && (!validatedRunId || (binding !== undefined && binding.runId !== config?.run_id));
+  if (root && validatedRunId && validatedInfoState) {
+    try {
+      const candidate = read<typeof state>(path.join(root, 'bridge-status.json'));
+      if (candidate && candidate.run_id === config!.run_id && (!binding || candidate.run_id === binding.runId)) state = candidate;
+    } catch { /* Legacy and unavailable status files remain explicitly unknown. */ }
+  }
+  const label = state ? (state.status === 'running' && state.phase === 'evaluating' ? 'evaluating' : statusLabel(state.status) ?? 'unknown/malformed') : invalidLifecycleIdentity ? 'unknown/malformed' : info.state;
+  const phase = state && typeof state.phase === 'string' && (state.phase !== 'evaluating' || state.status === 'running') ? displayValue(state.phase) : label;
+  const cycle = Number.isSafeInteger(state?.cycle) && Number(state!.cycle) >= 0 ? String(state!.cycle) : 'unavailable';
+  const maximum = Number.isSafeInteger(state?.max_cycles) && Number(state!.max_cycles) > 0 ? String(state!.max_cycles) : displayValue(config?.max_cycles);
+  const seconds = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+  const now = Date.now() / 1000;
+  const duration = (value: unknown) => {
+    const timestamp = seconds(value);
+    if (timestamp === undefined) return 'unavailable';
+    const total = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Math.max(0, now - timestamp)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return hours ? `${hours}h${String(minutes).padStart(2, '0')}m` : `${minutes}m${String(secs).padStart(2, '0')}s`;
+  };
+  const elapsed = duration(state?.started_at);
+  const age = duration(state?.updated_at);
+  const reason = state?.reason === undefined ? '' : `Reason: ${displayValue(state.reason)}`;
+  const next = label === 'completed' ? 'No further action.' : label === 'attention required' || label === 'unknown/malformed' ? 'Inspect saved state and launcher.log; do not relaunch automatically.' : label === 'waiting human' ? 'Provide the requested input in the reviewer session.' : label === 'waiting review' ? 'Review the pending checkpoint.' : label === 'ready to launch' ? 'Launch explicitly when ready.' : 'Monitor local status; no action is required.';
+  return [
+    `${info.name}: ${label} (phase ${phase})`,
+    `Mode: ${info.mode ?? 'unavailable'}; cycle ${cycle}/${maximum}; elapsed ${elapsed}; state age ${age}`,
+    `Worker: ${info.worker ?? 'unavailable'}`,
+    `Reviewer: ${info.reviewer ?? 'unavailable'}`,
+    `Directory: ${root ?? 'unavailable'}`,
+    `Config: ${root ? path.join(root, 'config.json') : 'unavailable'}`,
+    `Launcher log: ${root ? path.join(root, 'launcher.log') : 'unavailable'}`,
+    info.details ? `Details: ${displayValue(info.details)}` : '',
+    reason,
+    `Next: ${next}`,
+  ].filter(Boolean).join('\n');
+}
 function isExplicitPath(argument: string) {
   return argument.startsWith('/') || argument.startsWith('./') || argument.startsWith('../') || argument.startsWith('~') || argument.includes('/') || argument.includes('\\') || path.basename(argument) === 'config.json';
 }
@@ -283,11 +341,14 @@ export default function reviewedRuns(pi: ExtensionAPI) {
   let bindings: Binding[] = [];
   let timer: ReturnType<typeof setInterval> | undefined;
   const warned = new Set<string>();
+  const launchWatches = new Map<string, LaunchWatch>();
   function receiver(binding: Binding, connected: boolean) {
     atomic(path.join(binding.root, 'pi-receiver.json'), { run_id: binding.runId, session_id: binding.sessionId, connected, pid: process.pid });
   }
   function clear() {
     if (timer) clearInterval(timer);
+    launchWatches.clear();
+    context?.ui.setStatus(statusKey, undefined);
     timer = undefined;
     for (const binding of bindings) {
       try { receiver(binding, false); } catch { /* Preserve pending queue if storage is unavailable. */ }
@@ -300,8 +361,71 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     const ctx = context;
     if (!ctx) return;
     const sessionId = ctx.sessionManager.getSessionId();
+    const statusLines: string[] = [];
     for (const binding of bindings) {
       if (sessionId !== binding.sessionId) continue;
+      let config: Config | undefined;
+      let state: { run_id?: string; status?: string; phase?: string; cycle?: number; max_cycles?: number; started_at?: number; updated_at?: number; reason?: unknown; pi_session?: string } | undefined;
+      try {
+        if (!safeRunId(binding.runId)) throw new Error('invalid binding run_id');
+        config = read<Config>(path.join(binding.root, 'config.json'));
+        if (!safeRunId(config.run_id) || config.run_id !== binding.runId || config.pi_session_id !== sessionId || config.review_transport !== 'pi') throw new Error('identity mismatch');
+        state = read<typeof state>(path.join(binding.root, 'bridge-status.json'));
+        if (!state || state.run_id !== binding.runId) throw new Error('state identity mismatch');
+      } catch { state = undefined; }
+      const launchWatch = launchWatches.get(binding.runId);
+      if (launchWatch && state && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'complete', 'stopped'].includes(String(state.status))
+        && typeof state.pi_session === 'string' && state.pi_session.trim().length > 0 && config?.run_id === binding.runId) {
+        launchWatches.delete(binding.runId);
+        ctx.ui.notify(`Pi Ping Pong ${binding.runId}: worker/session startup confirmed.`, 'info');
+      }
+      const status = state ? String(state.status ?? '') : 'unknown';
+      const notificationState = statusLabel(state?.status);
+      if (state) {
+        try {
+          const directory = path.join(binding.root, 'pi-notifications');
+          fs.mkdirSync(directory, { mode: 0o700, recursive: true });
+          fs.chmodSync(directory, 0o700);
+          const receipt = path.join(directory, `${createHash('sha256').update(sessionId).digest('hex')}.json`);
+          let prior: { run_id?: string; session_id?: string; state?: string; observed?: string; last_notified?: string } | undefined;
+          try { prior = read<typeof prior>(receipt); } catch { /* A missing or malformed receipt permits one safe notice. */ }
+          const reasonValue = state.reason === undefined ? '' : displayValue(state.reason);
+          const cycleValue = Number.isSafeInteger(state.cycle) ? String(state.cycle) : 'unavailable';
+          const event = notificationState ? JSON.stringify([notificationState, cycleValue, reasonValue]) : undefined;
+          const sameBinding = prior?.run_id === binding.runId && prior?.session_id === sessionId;
+          // Migrate old state-only receipts without repeating the currently observed event.
+          const legacyDuplicate = sameBinding && prior?.last_notified === undefined && prior?.state === notificationState;
+          const notify = Boolean(event && notificationState && ['completed', 'stopped', 'attention required', 'waiting human'].includes(notificationState)
+            && !legacyDuplicate && (!sameBinding || prior?.last_notified !== event || prior.observed !== notificationState));
+          const next = {
+            run_id: binding.runId, session_id: sessionId, observed: notificationState ?? String(state.status ?? 'unknown'),
+            ...(event && notificationState && ['completed', 'stopped', 'attention required', 'waiting human'].includes(notificationState)
+              ? { last_notified: notify || legacyDuplicate ? event : prior?.last_notified } : { last_notified: prior?.last_notified }),
+          };
+          if (!sameBinding || prior?.observed !== next.observed || prior?.last_notified !== next.last_notified) atomic(receipt, { ...next, at: Date.now() });
+          if (notify) {
+            const reason = reasonValue ? ` Reason: ${reasonValue}` : '';
+            ctx.ui.notify(`Pi Ping Pong ${path.basename(binding.root).slice(0, 48)}: ${notificationState}.${reason} Details: /ppp-status`, notificationState === 'attention required' ? 'warning' : 'info');
+          }
+        } catch { /* Status refresh must remain available if notification storage is unavailable. */ }
+      }
+      const statusForDisplay = status === 'running' && state?.phase === 'evaluating' ? 'evaluating' : status;
+      const phase = status === 'starting' ? 'starting' : status === 'running' ? (statusForDisplay === 'evaluating' ? 'evaluating' : 'working')
+        : ['waiting_pi', 'waiting_codex'].includes(status) ? 'awaiting review' : status === 'waiting_human' ? 'awaiting your input'
+        : status === 'complete' ? 'completed' : status === 'stopped' ? 'stopped' : status === 'attention_required' ? 'attention' : 'unknown';
+      const maximum = Number.isSafeInteger(state?.max_cycles) && state!.max_cycles! > 0 ? state!.max_cycles : config?.max_cycles;
+      const cycle = state && Number.isSafeInteger(state.cycle) && state.cycle! >= 0
+        ? ` ${state.cycle}${Number.isSafeInteger(maximum) && Number(maximum) > 0 ? `/${maximum}` : ''}` : '';
+      const started = state?.started_at;
+      const elapsed = typeof started === 'number' && Number.isFinite(started) && started >= 0
+        ? ` ${Math.floor(Math.max(0, Date.now() / 1000 - started) / 60)}m${String(Math.floor(Math.max(0, Date.now() / 1000 - started) % 60)).padStart(2, '0')}s` : ' elapsed unavailable';
+      const name = path.basename(binding.root).slice(0, 48) || 'unknown run';
+      statusLines.push(`PPP ${name} ${phase}${cycle}${elapsed}`.slice(0, 120));
+      const launch = launchWatches.get(binding.runId);
+      if (launch && Date.now() > launch.deadline) {
+        launchWatches.delete(binding.runId);
+        ctx.ui.notify(`Pi Ping Pong ${binding.runId}: startup confirmation timed out; inspect ${path.join(binding.root, 'launcher.log')}. Do not relaunch.`, 'warning');
+      }
       try {
         const config = read<Config>(path.join(binding.root, 'config.json'));
         if (config.run_id !== binding.runId || config.pi_session_id !== sessionId || config.review_transport !== 'pi') continue;
@@ -341,6 +465,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         }
       }
     }
+    ctx.ui.setStatus(statusKey, statusLines.length ? statusLines.slice(0, 3).join(' | ') : undefined);
   }
   function startTimer() {
     if (!timer) {
@@ -358,7 +483,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       if (value?.sessionId !== id || bindings.some(b => b.root === value.root)) continue;
       try {
         const config = read<Config>(path.join(value.root, 'config.json'));
-        if (config.run_id !== value.runId || config.pi_session_id !== id) continue;
+        if (!safeRunId(value.runId) || !safeRunId(config.run_id) || config.run_id !== value.runId || config.pi_session_id !== id) continue;
         bindings.push(value);
         receiver(value, true);
       } catch { /* A removed run is not a reason to interrupt the user's session. */ }
@@ -407,9 +532,35 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     fs.fchmodSync(fd, 0o600);
     try {
       const child = spawn('python3', ['-B', script, 'run', '--config', file], { cwd: root, detached: true, stdio: ['ignore', fd, fd] });
-      await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      try {
+        await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      } catch (error) {
+        launchWatches.delete(config.run_id);
+        bindings = bindings.filter(item => item.root !== root || item.runId !== config.run_id || item.sessionId !== sessionId);
+        try { receiver(binding, false); } catch { /* Durable launch record remains authoritative. */ }
+        ctx.ui.notify(`Pi Ping Pong ${namedRun?.name ?? path.basename(root)}: bridge could not start (${String(error)}). The launch attempt is recorded; do not relaunch. Inspect ${logFile}.`, 'error');
+        return;
+      }
       child.unref();
-      ctx.ui.notify(`Started ${config.run_id} (pid ${child.pid}). Checkpoints return to this Pi session.`, 'info');
+      launchWatches.set(config.run_id, { root, runId: config.run_id, deadline: Date.now() + 45_000 });
+      child.once('exit', code => {
+        const watch = launchWatches.get(config.run_id);
+        if (!watch || watch.root !== root) return;
+        try {
+          const state = read<{ run_id?: string; status?: string; pi_session?: string }>(path.join(root, 'bridge-status.json'));
+          const bound = read<Config>(file);
+          if (state.run_id === config.run_id && bound.run_id === config.run_id && bound.pi_session_id === sessionId
+            && bound.review_transport === 'pi' && typeof state.pi_session === 'string' && state.pi_session.trim().length > 0
+            && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'complete', 'stopped'].includes(String(state.status))) {
+            launchWatches.delete(config.run_id);
+            ctx.ui.notify(`Pi Ping Pong ${config.run_id}: worker/session startup confirmed.`, 'info');
+            return;
+          }
+        } catch { /* Missing startup state is diagnosed below. */ }
+        launchWatches.delete(config.run_id);
+        ctx.ui.notify(`Pi Ping Pong ${config.run_id}: bridge exited before worker/session startup was confirmed (exit ${code ?? 'unknown'}); inspect ${logFile}. Do not relaunch.`, 'error');
+      });
+      ctx.ui.notify(`Launch accepted for ${config.run_id} (bridge pid ${child.pid}); worker/session startup is not yet confirmed. Monitoring for up to 45 seconds; diagnostics: ${logFile}`, 'info');
     } finally { fs.closeSync(fd); }
   };
   const startReviewedRun = async (args: string, ctx: ExtensionCommandContext) => {
@@ -447,19 +598,18 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       }
       return;
     }
-    if (isExplicitPath(argument)) {
+    if (isExplicitPath(argument) && path.basename(argument) === 'config.json') {
       const file = path.resolve(ctx.cwd, argument.startsWith('~') ? path.join(os.homedir(), argument.slice(1)) : argument);
       return launchConfig(file, ctx);
     }
-    if (!validRunName(argument)) {
-      ctx.ui.notify(`Invalid run name. Use lowercase ASCII kebab-case, 1–${maxRunNameLength} characters. A path must name an existing config.json; it will not create a run.`, 'error');
-      return;
-    }
+    const taskOrName = argument.trim();
+    const isNameOnly = validRunName(taskOrName);
+    const name = isNameOnly ? taskOrName : generatedRunName(taskOrName);
     const project = await resolveProject(ctx);
     if (!project) return;
-    return startNamedRun(argument, ctx, project);
+    return startNamedRun(name, ctx, project, isNameOnly ? '' : taskOrName, !isNameOnly);
   };
-  async function startNamedRun(name: string, ctx: ExtensionCommandContext, project: Project) {
+  async function startNamedRun(name: string, ctx: ExtensionCommandContext, project: Project, taskDescription = '', taskGenerated = false) {
     if (!validRunName(name)) {
       ctx.ui.notify(`Invalid run name. Use lowercase ASCII kebab-case, 1–${maxRunNameLength} characters.`, 'error');
       return;
@@ -470,6 +620,13 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     } catch (error) { ctx.ui.notify(String(error), 'error'); return; }
     const dir = path.join(runStorage(project), name);
     if (fs.existsSync(dir)) {
+      if (taskGenerated) {
+        let info: RunInfo;
+        try { info = listRuns(project).find(run => run.name === name) ?? inspectRun(name, dir); }
+        catch (error) { ctx.ui.notify(String(error), 'error'); return; }
+        ctx.ui.notify(`This task already has a run (${name}); it was not relaunched. ${details(info)}`, 'warning');
+        return;
+      }
       let info: RunInfo;
       try { info = listRuns(project).find(run => run.name === name) ?? inspectRun(name, dir); }
       catch (error) { ctx.ui.notify(String(error), 'error'); return; }
@@ -477,7 +634,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       if (info.state === 'ready to launch') return launchConfig(path.join(dir, 'config.json'), ctx, { project, name, dir });
       if (info.state === 'draft/incomplete') {
         const action = await ctx.ui.select(`Run ${name} is incomplete`, ['Continue preparation', 'Back']);
-        if (action === 'Continue preparation') return sendPreparation(pi, ctx, project, name, dir, true);
+        if (action === 'Continue preparation') return sendPreparation(pi, ctx, project, name, dir, true, taskDescription);
       }
       return;
     }
@@ -491,7 +648,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       ctx.ui.notify(String(error), 'error');
       return;
     }
-    sendPreparation(pi, ctx, project, name, reserved, false);
+    sendPreparation(pi, ctx, project, name, reserved, false, taskDescription);
   }
 
   for (const command of ['pi-ping-pong', 'reviewed-run', 'ppp']) {
@@ -501,30 +658,27 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     });
   }
   const showReviewedStatus = async (_args: string, ctx: ExtensionCommandContext) => {
-    const lines: string[] = [];
+    const byPath = new Map<string, { info: RunInfo; binding?: Binding }>();
     const project = await resolveProject(ctx);
     if (project) {
       try {
-        const runs = listRuns(project);
-        lines.push(...runs.map(formatRun));
-        if (!runs.length) lines.push(`No named runs in ${runStorage(project)}.`);
-      } catch (error) { lines.push(`Project run status unavailable: ${String(error)}`); }
+        for (const info of listRuns(project)) if (info.dir) byPath.set(canonicalPath(info.dir), { info });
+      } catch (error) { byPath.set(`project-error:${project.root}`, { info: { name: 'Project runs', state: 'unknown/malformed', details: String(error) } }); }
     }
+    const sessionId = ctx.sessionManager.getSessionId();
     for (const binding of bindings) {
-      try {
-        const state = read<{ status: string; cycle: number; run_id?: string }>(path.join(binding.root, 'bridge-status.json'));
-        const label = state.run_id === binding.runId ? statusLabel(state.status) ?? 'unknown/malformed' : 'unknown/malformed';
-        const line = `${binding.runId}: ${label}, cycle ${Number.isSafeInteger(state.cycle) ? state.cycle : 'unknown'}. ${binding.root}`;
-        const prior = lines.findIndex(value => value.includes(binding.runId));
-        if (prior >= 0) lines[prior] = line; else lines.push(line);
-      } catch {
-        const line = `${binding.runId}: starting or unavailable. ${binding.root}`;
-        const prior = lines.findIndex(value => value.includes(binding.runId));
-        if (prior >= 0) lines[prior] = line; else lines.push(line);
-      }
+      if (binding.sessionId !== sessionId) continue;
+      const canonical = canonicalPath(binding.root);
+      const prior = byPath.get(canonical);
+      if (prior) { prior.binding = binding; continue; }
+      let info: RunInfo;
+      try { info = inspectRun(path.basename(binding.root), binding.root); }
+      catch { info = { name: path.basename(binding.root), dir: binding.root, state: 'unknown/malformed' }; }
+      byPath.set(canonical, { info, binding });
     }
+    const lines = [...byPath.values()].map(({ info, binding }) => detailedStatus(info, binding));
     if (!lines.length) lines.push('No named or attached reviewed runs are available in this project/session.');
-    ctx.ui.notify(lines.join('\n'), 'info');
+    ctx.ui.notify(lines.join('\n\n'), 'info');
   };
   for (const command of ['pi-ping-pong-status', 'reviewed-status', 'ppp-status']) {
     pi.registerCommand(command, {
