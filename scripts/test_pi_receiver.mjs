@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -81,6 +81,7 @@ const makeReadyRun = (name, runId = randomUUID()) => {
 };
 const hooks = new Map(), commands = new Map(), messages = [], userMessages = [], entries = [], notices = [], selectCalls = [];
 const selectAnswers = [], inputAnswers = [], confirmAnswers = [];
+const statusValues = new Map();
 const entry = { type: 'custom', customType: 'pi-reviewed-run', data: { root: path.join(root, 'legacy-run'), runId: 'Test-run', sessionId: 'Test-session' } };
 const ctx = {
   model: { id: 'test-review-model', provider: 'test-review-provider' }, cwd: project, mode: 'tui', hasUI: true,
@@ -88,6 +89,7 @@ const ctx = {
   sessionManager: { getSessionId: () => 'Test-session', getEntries: () => [entry] },
   ui: {
     notify: (...args) => notices.push(args),
+    setStatus: (key, value) => { if (value === undefined) statusValues.delete(key); else statusValues.set(key, value); },
     select: async (title, options) => { selectCalls.push({ title, options }); const answer = selectAnswers.shift(); return typeof answer === 'function' ? answer(title, options) : answer; },
     input: async (title, placeholder) => { const answer = inputAnswers.shift(); return typeof answer === 'function' ? answer(title, placeholder) : answer; },
     confirm: async (title, message) => { const answer = confirmAnswers.shift(); return typeof answer === 'function' ? answer(title, message) : (answer ?? false); },
@@ -123,10 +125,26 @@ try {
   assert.equal(fs.existsSync(path.join(draft, 'launch-attempt.json')), false, 'preparation does not create launch state');
   assert.equal(entries.length, 0, 'preparation does not attach a run to the Pi session');
   const prompt = userMessages.at(-1).message;
-  for (const required of [project, 'Selected run name: add-linters', draft, 'unique RFC 4122 UUID run_id', 'UUID is for run_id only', 'never guess the worker model', 'test-review-provider/test-review-model', 'positive finite integer', 'independent task-specific', 'Do not start or launch the worker', 'Do not write pi_session_id', 'do not overwrite .draft.json', '/pi-ping-pong add-linters']) {
+  for (const required of [project, 'Selected run name: add-linters', draft, 'unique RFC 4122 UUID run_id', 'UUID is for run_id only', 'worker_model to gpt-6-luna', 'thinking to low', 'max_cycles to 10', 'do not ask the user to confirm them', 'test-review-provider/test-review-model', 'use it without confirmation unless no model is selected', 'positive finite integer', 'independent task-specific', 'Do not start or launch the worker', 'Do not write pi_session_id', 'do not overwrite .draft.json', '/pi-ping-pong add-linters']) {
     assert.ok(prompt.includes(required), `preparation prompt must include ${required}`);
   }
   assert.equal(fs.existsSync(childMarker), false, 'preparation never spawns a worker');
+
+  const oneLineTask = 'analyze changes in src/index.ts, suggest commit names, list files, and wait for approval';
+  const generatedName = `${oneLineTask.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 39).replace(/-+$/g, '')}-${createHash('sha256').update(oneLineTask).digest('hex').slice(0, 8)}`;
+  const beforeOneLineCommand = userMessages.length;
+  await runCommand('ppp', oneLineTask);
+  assert.equal(userMessages.length, beforeOneLineCommand + 1, 'task-only command starts preparation');
+  assert.ok(userMessages.at(-1).message.includes(`Task requested in the command: ${oneLineTask}`), 'task text is passed into preparation');
+  assert.ok(fs.existsSync(path.join(storage, generatedName, '.draft.json')), 'task content determines its automatic run name');
+  await runCommand('ppp', 'analyze the bugreport');
+  const bugreportRun = fs.readdirSync(storage).find(name => name.startsWith('analyze-the-bugreport-'));
+  assert.ok(bugreportRun && bugreportRun !== generatedName, 'distinct tasks sharing the same first word receive distinct names');
+  const beforeDuplicateTask = userMessages.length;
+  await runCommand('ppp', oneLineTask);
+  assert.equal(userMessages.length, beforeDuplicateTask, 'repeating identical task does not prepare or launch the existing run');
+  assert.match(String(notices.at(-1)[0]), /was not relaunched/, 'duplicate task reports the existing run without launching it');
+  assert.equal(fs.existsSync(childMarker), false, 'task preparation and duplicate detection never launch a worker');
 
   write(path.join(draft, 'TASK.md'), 'Synthetic partial task content; preserve it.', 0o600);
   const partialBefore = fs.readFileSync(path.join(draft, 'TASK.md'), 'utf8');
@@ -177,11 +195,11 @@ try {
   process.env.PATH = previousPath;
   for (const key of ['PPP_RACE_COUNTER', 'PPP_RACE_TARGET', 'PPP_RACE_DIR', 'PPP_RACE_PARENT', 'PPP_REAL_GIT']) delete process.env[key];
 
-  for (const unsafe of ['.hidden', 'Bad-Name', 'bad_name', 'a'.repeat(49), '../escape']) {
+  for (const taskText of ['.hidden', 'Bad-Name', 'bad_name', 'a'.repeat(49), '../escape']) {
     const before = userMessages.length;
-    try { await runCommand('pi-ping-pong', unsafe); } catch { /* Explicit path failures are expected to reject. */ }
-    assert.equal(userMessages.length, before, `unsafe/non-name input ${unsafe} is not preparation`);
-    assert.equal(fs.existsSync(path.join(project, 'escape')), false, 'path traversal must not create outside runs');
+    await runCommand('pi-ping-pong', taskText);
+    assert.equal(userMessages.length, before + 1, `non-kebab input ${taskText} is task content`);
+    assert.equal(fs.existsSync(path.join(project, 'escape')), false, 'task text must never become an unsanitized run path');
   }
   await assert.rejects(runCommand('pi-ping-pong', 'missing/config.json'), /Config not found/);
   await assert.rejects(runCommand('pi-ping-pong', path.join(root, 'missing-absolute', 'config.json')), /Config not found/);
@@ -277,15 +295,34 @@ try {
   makeRun('test-incomplete', { config: null, launched: false });
   makeRun('test-bound-no-status', { config: { ...tempConfig(path.join(storage, 'test-bound-no-status')), pi_session_id: 'Test-session' }, launched: false });
   const duplicateId = randomUUID();
-  makeReadyRun('duplicate-a', duplicateId);
-  makeReadyRun('duplicate-b', duplicateId);
+  const duplicateA = path.join(storage, 'duplicate-a');
+  const duplicateB = path.join(storage, 'duplicate-b');
+  makeRun('duplicate-a', { config: tempConfig(duplicateA, duplicateId), status: 'running' });
+  makeRun('duplicate-b', { config: tempConfig(duplicateB, duplicateId), status: 'running' });
+  const missingIdentity = makeRun('test-missing-config-identity', { config: null, launched: true });
+  write(path.join(missingIdentity, 'bridge-status.json'), { status: 'running', phase: 'evaluating', cycle: 1 });
+  const legacyExternal = makeRun('test-legacy-external', { config: tempConfig(path.join(storage, 'test-legacy-external'), 'Test-legacy-run'), status: 'waiting_human' });
+  write(path.join(legacyExternal, 'bridge-status.json'), { run_id: 'Test-legacy-run', status: 'waiting_human', cycle: 2, max_cycles: 3, started_at: 100, updated_at: 110, reason: 'Test input required' });
+  const emptyIdentity = makeRun('test-empty-identity', { config: { ...tempConfig(path.join(storage, 'test-empty-identity')), run_id: '' }, status: 'running' });
+  write(path.join(emptyIdentity, 'bridge-status.json'), { run_id: '', status: 'running', phase: 'working', cycle: 2, reason: 'Test invalid identity' });
+  const malformedIdentity = makeRun('test-malformed-identity', { config: { ...tempConfig(path.join(storage, 'test-malformed-identity')), run_id: 'Test/bad' }, status: 'running' });
+  write(path.join(malformedIdentity, 'bridge-status.json'), { run_id: 'Test/bad', status: 'running', phase: 'working', cycle: 2 });
   const beforeStatus = userMessages.length;
   await runCommand('pi-ping-pong-status');
   const statusText = notices.at(-1)[0];
-  for (const fragment of ['test-running — running', 'test-starting — running', 'test-wait-review — waiting review', 'test-wait-human — waiting human', 'test-completed — completed', 'test-stopped — stopped', 'test-attention — attention required', 'test-malformed — unknown/malformed', 'test-incomplete — draft/incomplete', 'test-bound-no-status — attention required', 'duplicate-a — unknown/malformed', 'duplicate-b — unknown/malformed']) {
+  for (const fragment of ['test-running: running', 'test-starting: starting', 'test-wait-review: waiting review', 'test-wait-human: waiting human', 'test-completed: completed', 'test-stopped: stopped', 'test-attention: attention required', 'test-malformed: unknown/malformed', 'test-incomplete: draft/incomplete', 'test-bound-no-status: attention required', 'duplicate-a: unknown/malformed', 'duplicate-b: unknown/malformed', 'test-missing-config-identity: unknown/malformed', 'test-legacy-external: waiting human', 'test-empty-identity: unknown/malformed', 'test-malformed-identity: unknown/malformed']) {
     assert.ok(statusText.includes(fragment), `local status should include ${fragment}`);
   }
   assert.equal(userMessages.length, beforeStatus, 'status inspection never calls a model');
+  assert.doesNotMatch(statusText, /duplicate-[ab]: (?:running|evaluating)/, 'duplicate run identities must remain unknown despite matching raw status');
+  assert.match(statusText, /test-missing-config-identity: unknown\/malformed \(phase unknown\/malformed\)/, 'missing config/run identity must not validate raw evaluating metadata');
+  assert.match(statusText, /test-legacy-external: waiting human \(phase waiting human\)[\s\S]*?cycle 2\/3[\s\S]*?Reason: Test input required/, 'safe external legacy IDs retain validated lifecycle metadata');
+  assert.match(statusText, /test-empty-identity: unknown\/malformed \(phase unknown\/malformed\)[\s\S]*?cycle unavailable/, 'empty IDs cannot fall back to cached active state or expose unvalidated metadata');
+  assert.match(statusText, /test-malformed-identity: unknown\/malformed \(phase unknown\/malformed\)/, 'unsafe malformed IDs cannot validate matching raw lifecycle status');
+  assert.ok(statusText.includes('Reviewer: test-review-provider/test-review-model'), 'detailed status includes reviewer identity');
+  assert.match(statusText, /Directory: .*test-running/, 'detailed status includes the relevant run path');
+  assert.ok(statusText.includes('cycle 1/3'), 'detailed status includes cycle and configured budget');
+  assert.match(statusText, /Next:/, 'detailed status includes an actionable next step');
   const primaryStatus = statusText;
   await runCommand('reviewed-status');
   assert.equal(notices.at(-1)[0], primaryStatus, 'legacy status alias is equivalent');
@@ -339,16 +376,61 @@ try {
   fs.mkdirSync(legacyRoot, { mode: 0o700 });
   write(path.join(legacyRoot, 'config.json'), { run_id: 'Test-run', mode: 'goal', review_transport: 'pi', pi_session_id: 'Test-session', review_model: 'test-review-model', review_provider: 'test-review-provider' });
   fs.mkdirSync(path.join(legacyRoot, 'pi-inbox'), { mode: 0o700 });
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'running', phase: 'working', cycle: 1, started_at: Math.floor(Date.now() / 1000) });
   const envelope = { id: 'one', run_id: 'Test-run', session_id: 'Test-session', kind: 'review', message: 'Codex checkpoint: read evidence', receipt: path.join(legacyRoot, 'receipt.txt') };
   write(path.join(legacyRoot, 'pi-inbox', '001.message.json'), envelope);
   await hooks.get('session_start')({}, ctx);
   assert.equal(commands.size, 6, 'all aliases remain registered after session start');
   assert.equal(messages.length, 1);
+  const completionNotices = notices.filter(notice => String(notice[0]).includes('Pi Ping Pong legacy-run: completed')).length;
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'complete', phase: 'complete', cycle: 1, updated_at: Date.now() / 1000 });
+  await hooks.get('model_select')({}, ctx);
+  const noticesAfterComplete = notices.filter(notice => String(notice[0]).includes('Pi Ping Pong legacy-run: completed')).length;
+  assert.equal(noticesAfterComplete, completionNotices + 1, 'material terminal transition is notified once');
+  await hooks.get('session_shutdown')();
+  await hooks.get('session_start')({}, ctx);
+  assert.equal(notices.filter(notice => String(notice[0]).includes('Pi Ping Pong legacy-run: completed')).length, completionNotices + 1, 'persisted terminal notification receipt prevents reload spam');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'complete', phase: 'evaluating', cycle: 1 });
+  await runCommand('ppp-status');
+  assert.match(notices.at(-1)[0], /legacy-run: completed \(phase completed\)/, 'terminal status must override a stale evaluating phase in detailed status');
+  assert.doesNotMatch(notices.at(-1)[0].split('\n')[0], /evaluating/);
+  const blockerCount = () => notices.filter(notice => String(notice[0]).includes('Pi Ping Pong legacy-run: waiting human.')).length;
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'waiting_human', cycle: 1, reason: 'Test first input', updated_at: 1 });
+  await hooks.get('model_select')({}, ctx);
+  let blockerNotices = blockerCount();
+  assert.equal(blockerNotices, 1, 'first human blocker emits a notification');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'waiting_human', cycle: 1, reason: 'Test first input', updated_at: 2 });
+  await hooks.get('model_select')({}, ctx);
+  assert.equal(blockerCount(), blockerNotices, 'timestamp-only refresh does not spam blocker notices');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'running', cycle: 2 });
+  await hooks.get('model_select')({}, ctx);
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'waiting_human', cycle: 2, reason: 'Test first input' });
+  await hooks.get('model_select')({}, ctx);
+  blockerNotices = blockerCount();
+  assert.equal(blockerNotices, 2, 'same blocker re-entered after observed work in a new cycle emits again');
+  await hooks.get('session_shutdown')();
+  await hooks.get('session_start')({}, ctx);
+  assert.equal(blockerCount(), blockerNotices, 'durable receipt prevents blocker replay after reload');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'waiting_human', cycle: 2, reason: 'Test changed input' });
+  await hooks.get('model_select')({}, ctx);
+  assert.equal(blockerCount(), blockerNotices + 1, 'changed blocker reason emits a new notification');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'running', cycle: 2 });
+  await hooks.get('model_select')({}, ctx);
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'waiting_human', cycle: 2, reason: 'Test changed input' });
+  await hooks.get('model_select')({}, ctx);
+  assert.equal(blockerCount(), blockerNotices + 2, 'observed blocker re-entry emits again even with unchanged cycle and reason');
+  await hooks.get('session_shutdown')();
+  await hooks.get('session_start')({}, ctx);
+  assert.equal(blockerCount(), blockerNotices + 2, 're-entry notification remains deduplicated after reload');
+  write(path.join(legacyRoot, 'bridge-status.json'), { run_id: 'Test-run', status: 'running', phase: 'working', cycle: 1, started_at: Date.now() / 1000 });
+  await hooks.get('model_select')({}, ctx);
+  assert.match(statusValues.get('pi-ping-pong'), /PPP legacy-run working 1/, 'poll publishes a readable basename through the native PPP footer status API');
   assert.ok(commands.has('pi-ping-pong-status') && commands.has('reviewed-status') && commands.has('ppp-status'));
   assert.equal(messages[0].options.deliverAs, 'followUp');
   assert.equal(messages[0].options.triggerTurn, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(legacyRoot, 'pi-inbox', '001.delivery.json'), 'utf8')).status, 'enqueued_in_pi');
   await hooks.get('session_shutdown')();
+  assert.equal(statusValues.has('pi-ping-pong'), false, 'session shutdown clears only the receiver-owned footer status');
   await hooks.get('session_start')({}, ctx);
   assert.equal(messages.length, 1, 'reload does not duplicate durable delivery');
   ctx.model.id = 'test-other-review-model';
@@ -363,6 +445,36 @@ try {
   await hooks.get('model_select')({}, ctx);
   assert.equal(messages.length, 2, 'wrong session is rejected');
   assert.equal(JSON.parse(fs.readFileSync(path.join(legacyRoot, 'pi-inbox', '003.delivery.json'), 'utf8')).status, 'rejected_identity');
+  await hooks.get('session_shutdown')();
+
+  const invalidBindings = [];
+  for (const [name, runId] of [['empty-run-id', ''], ['unsafe-run-id', 'Test/bad']]) {
+    const dir = path.join(root, name);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    write(path.join(dir, 'config.json'), { run_id: runId, mode: 'ralph', review_transport: 'pi', pi_session_id: 'Test-session', review_model: 'test-review-model' });
+    write(path.join(dir, 'bridge-status.json'), { run_id: runId, status: 'complete', phase: 'evaluating', cycle: 1, pi_session: 'Test-worker-session' });
+    const binding = { root: dir, runId, sessionId: 'Test-session' };
+    invalidBindings.push(binding);
+    entries.push({ type: 'custom', customType: 'pi-reviewed-run', data: binding });
+  }
+  const noticesBeforeInvalidRestore = notices.length;
+  const messagesBeforeInvalidRestore = messages.length;
+  const invalidRestoreEntries = [entry, ...invalidBindings.map(data => ({ type: 'custom', customType: 'pi-reviewed-run', data }))];
+  let restoredEntries;
+  const invalidRestoreContext = {
+    ...ctx,
+    sessionManager: {
+      getSessionId: () => 'Test-session',
+      getEntries: () => { restoredEntries = invalidRestoreEntries; return restoredEntries; },
+    },
+  };
+  await hooks.get('session_start')({}, invalidRestoreContext);
+  assert.strictEqual(restoredEntries, invalidRestoreEntries, 'session restoration must receive the actual invalid bindings and valid legacy control');
+  assert.equal(restoredEntries.length, 1 + invalidBindings.length, 'all invalid fixture entries reach restoration alongside the valid legacy binding');
+  assert.match(String(statusValues.get('pi-ping-pong') ?? ''), /PPP legacy-run working/, 'valid legacy control restores while invalid external bindings are rejected');
+  assert.doesNotMatch(String(statusValues.get('pi-ping-pong') ?? ''), /empty-run-id|unsafe-run-id|completed|evaluating/, 'restored invalid external bindings cannot publish active or terminal lifecycle footer state');
+  assert.equal(notices.length, noticesBeforeInvalidRestore, 'invalid restored identities cannot emit startup or terminal notices');
+  assert.equal(messages.length, messagesBeforeInvalidRestore, 'invalid restored identities cannot trigger model turns');
   await hooks.get('session_shutdown')();
   const otherSession = { ...ctx, sessionManager: { getSessionId: () => 'Test-other-session', getEntries: () => [entry] } };
   await hooks.get('session_start')({}, otherSession);
@@ -385,6 +497,24 @@ try {
   await runCommand('ppp', path.join(oldExternal, 'config.json'));
   await waitForChild();
   assert.ok(fs.existsSync(path.join(oldExternal, 'launch-attempt.json')), 'absolute legacy external run path remains compatible');
+
+  const missingPython = path.join(root, 'spawn-error', 'config.json');
+  write(missingPython, { run_id: 'Test-spawn-error', mode: 'ralph', review_model: 'test-review-model' });
+  const previousSpawnPath = process.env.PATH;
+  process.env.PATH = path.join(root, 'empty-path');
+  fs.mkdirSync(process.env.PATH, { mode: 0o700 });
+  const noticesBeforeSpawnError = notices.length;
+  try { await runCommand('ppp', missingPython); }
+  finally { process.env.PATH = previousSpawnPath; }
+  const spawnNotices = notices.slice(noticesBeforeSpawnError).map(notice => String(notice[0]));
+  assert.ok(spawnNotices.some(notice => /spawn-error/.test(notice) && /could not start|failed/i.test(notice) && /launcher\.log/.test(notice)), 'spawn error must notify with readable run name and launcher.log path');
+  assert.ok(!spawnNotices.some(notice => /confirmed|worker.*started/i.test(notice)), 'spawn error must never confirm worker startup');
+  assert.ok(fs.existsSync(path.join(path.dirname(missingPython), 'launch-attempt.json')), 'spawn failure preserves launch-attempt duplicate-refusal record');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(path.dirname(missingPython), 'pi-receiver.json'), 'utf8')), {
+    run_id: 'Test-spawn-error', session_id: 'Test-session', connected: false, pid: process.pid,
+  }, 'spawn failure disconnects the run-local receiver while retaining matching run/session identity');
+  await assert.rejects(runCommand('ppp', missingPython), /already launched/);
+  assert.equal(notices.length, noticesBeforeSpawnError + spawnNotices.length, 'duplicate launch refusal does not emit a second spawn report');
 
   const readyLaunch = makeReadyRun('ready-launch-run');
   await runCommand('pi-ping-pong', 'ready-launch-run');
