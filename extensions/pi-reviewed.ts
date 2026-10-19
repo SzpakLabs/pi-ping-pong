@@ -123,10 +123,16 @@ function runStorage(project: Project) {
     ? path.join(project.root, '.pi', 'reviewed-runs', 'named')
     : path.join(project.root, '.pi-ping-pong', 'runs');
 }
+function projectGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const localVars = execFileSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' });
+  for (const name of localVars.trim().split(/\s+/)) delete env[name];
+  return env;
+}
 function ignoredByGit(project: Project, name: string) {
   if (!project.git || project.fallback) return true;
   try {
-    execFileSync('git', ['-C', project.root, 'check-ignore', '-q', '--', `.pi-ping-pong/runs/${name}`], { stdio: 'ignore' });
+    execFileSync('git', ['-C', project.root, 'check-ignore', '-q', '--', `.pi-ping-pong/runs/${name}`], { stdio: 'ignore', env: projectGitEnv() });
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException & { status?: number }).status;
@@ -136,7 +142,7 @@ function ignoredByGit(project: Project, name: string) {
 }
 async function resolveProject(ctx: ExtensionContext): Promise<Project | undefined> {
   try {
-    const root = execFileSync('git', ['-C', ctx.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const root = execFileSync('git', ['-C', ctx.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: projectGitEnv() }).trim();
     return { root: fs.realpathSync(root), fallback: false, git: true };
   } catch {
     if (!ctx.hasUI) {

@@ -7,6 +7,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const gitLocalVars = execFileSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' }).trim().split(/\s+/);
+for (const name of gitLocalVars) delete process.env[name];
+
 const packageJson = process.env.PI_PACKAGE_JSON || path.join(os.homedir(), '.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/package.json');
 const require = createRequire(packageJson);
 const { createJiti } = require('jiti');
@@ -221,6 +224,9 @@ try {
   fs.mkdirSync(nonGit, { mode: 0o700 });
   ctx.cwd = nonGit;
   confirmAnswers.push(true);
+  process.env.GIT_DIR = path.join(project, '.git');
+  process.env.GIT_WORK_TREE = project;
+  process.env.GIT_INDEX_FILE = path.join(project, '.git', 'index');
   await runCommand('ppp', 'confirmed-run');
   assert.ok(fs.existsSync(path.join(nonGit, '.pi-ping-pong', 'runs', 'confirmed-run', '.draft.json')), 'non-Git project is used only after explicit folder confirmation');
   const fallbackHome = path.join(root, 'fallback-home');
@@ -240,6 +246,7 @@ try {
   assert.ok(fs.existsSync(path.join(storage, 'root-from-git', '.draft.json')), 'Git top-level, not cwd subdirectory, determines project storage');
   assert.equal(fs.existsSync(path.join(nestedCwd, '.pi-ping-pong')), false);
   ctx.cwd = originalCwd;
+  for (const name of gitLocalVars) delete process.env[name];
 
   const readyDir = makeReadyRun('test-ready-menu');
   const readyInfoText = `test-ready-menu — ready to launch — ralph — test-worker-provider/test-worker-model`;
