@@ -1,8 +1,8 @@
 # Pi Ping Pong — User Guide
 
-[← Project overview](README.md) · [Install](#install) · [Pi quick start](#quick-start-reviewer-in-pi) · [Codex quick start](#quick-start-reviewer-in-codex) · [Run contract](references/reviewed-runs.md)
+[← Project overview](../README.md) · [Install](#install) · [Pi quick start](#quick-start-reviewer-in-pi) · [Codex quick start](#quick-start-reviewer-in-codex) · [Run contract](../references/reviewed-runs.md)
 
-This guide covers setup, daily use, advanced launch options, and troubleshooting details. For a short introduction, start with the [README](README.md).
+This guide covers setup, daily use, advanced launch options, and troubleshooting details. For a short introduction, start with the [README](../README.md).
 
 ## Contents
 
@@ -40,7 +40,7 @@ Model review complements eval; it does not replace it. A zero exit code is not p
 |---|---|
 | Keeps one Pi worker session and waits for review decisions at logical checkpoints. | Runs one native Ralph iteration per review boundary. Iterations share the task's `work/` outputs; each gets its own iteration directory. This is not a fully isolated sandbox. |
 
-**Prototype and validation status:** this is a local working prototype. The Goal lifecycle issue where an intermediate `agent_settled` ended the bridge cycle has deterministic regression coverage. Existing development notes conflict: the former README opening reported a live three-cycle Goal run, while later sections and the [run contract](references/reviewed-runs.md#protocol-and-return-decisions) said no new live run had been performed. Live compatibility remains unconfirmed until dated run artifacts, source/install identity, and dependency versions are reconciled. Predecessor runs and local unit tests do not establish live validation of this checkout.
+**Prototype and validation status:** this is a local working prototype. The Goal lifecycle issue where an intermediate `agent_settled` ended the bridge cycle has deterministic regression coverage. Existing development notes conflict: the former README opening reported a live three-cycle Goal run, while later sections and the [run contract](../references/reviewed-runs.md#protocol-and-return-decisions) said no new live run had been performed. Live compatibility remains unconfirmed until dated run artifacts, source/install identity, and dependency versions are reconciled. Predecessor runs and local unit tests do not establish live validation of this checkout.
 
 ## Requirements
 
@@ -72,7 +72,7 @@ These commands are examples only; this repository's installer does not install o
 
 **Reviewer in Codex:** a running authenticated Codex host and an existing target chat are required. The bridge invokes `codex queue --thread ... --model ... --message ...`. `codex queue` is a Codex CLI subcommand, not a command provided by this repository; it is environment/version dependent and must be available in your installation. Do not assume every Codex setup has it. `codex exec resume` is not a substitute when the desktop host is already writing to that chat.
 
-The bridge's default extension paths, supported platform, and CLI behavior are implementation details, not a promise that every Pi/Codex version or provider configuration works. See [the full run contract](references/reviewed-runs.md).
+The bridge's default extension paths, supported platform, and CLI behavior are implementation details, not a promise that every Pi/Codex version or provider configuration works. See [the full run contract](../references/reviewed-runs.md).
 
 ## Install
 
@@ -114,7 +114,7 @@ Commands register during extension loading, without calling runtime-only APIs. P
 
    > Prepare a Pi Ping Pong run for **[task]**. Use **[Goal or Ralph]**, worker model **[available model ID]**, reviewer model **[available model ID]**, and these acceptance criteria: **[criteria]**. Choose finite cycle and time limits. Create a private run directory containing `TASK.md`, `config.json`, and an independent eval. Do not start the run yet; show me the actual config path and limits.
 
-2. Review the generated files and limits. The agent should prepare `TASK.md`, `config.json`, and a task-specific eval that runs independently of worker outputs. See [the full config and protocol](references/reviewed-runs.md); do not copy a placeholder path as though it exists.
+2. Review the generated files and limits. The agent should prepare `TASK.md`, `config.json`, and a task-specific eval that runs independently of worker outputs. See [the full config and protocol](../references/reviewed-runs.md); do not copy a placeholder path as though it exists.
 3. In the shell on the host with Pi, the bridge, and the Codex host available, run this **shell command**, replacing the placeholder with the actual `config.json` path:
 
    ```sh
@@ -137,7 +137,7 @@ The phone does not start the host's local Pi processes by itself. The host must 
 | Preparation refuses to save in a Git project | Add `.pi-ping-pong/` to that project's `.gitignore` and verify the run path is ignored. |
 | Review delivery is held because the model/provider differs | Select the reviewer provider/model recorded in the config in the launching Pi session. |
 | A previously launched name only shows status | Expected: names cannot be replayed. Use a new name for new work. For interrupted work, inspect saved evidence before an explicitly authorized recovery run. |
-| Launch fails or delivery is uncertain | Inspect `/ppp-status`, `launcher.log`, saved run state, and the target transcript. Do not automatically resend or relaunch. See [failure/recovery boundaries](references/reviewed-runs.md#failurerecovery-boundaries). |
+| Launch fails or delivery is uncertain | Inspect `/ppp-status`, `launcher.log`, saved run state, and the target transcript. Do not automatically resend or relaunch. See [failure/recovery boundaries](../references/reviewed-runs.md#failurerecovery-boundaries). |
 
 ## Limits and safety
 
@@ -158,6 +158,6 @@ python3 -B scripts/test_bridge.py
 node scripts/test_pi_receiver.mjs
 ```
 
-They use fake worker/queue APIs and do not require paid model runs. A passing unit test is not live-run acceptance. See [AGENTS.md](AGENTS.md) for maintenance invariants and [reviewed-runs.md](references/reviewed-runs.md) for configuration, protocol, recovery, and reviewer transport details.
+They use fake worker/queue APIs and do not require paid model runs. A passing unit test is not live-run acceptance. See [AGENTS.md](../AGENTS.md) for maintenance invariants and [reviewed-runs.md](../references/reviewed-runs.md) for configuration, protocol, recovery, and reviewer transport details.
 
-Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Artem Litvinko.
+Licensed under the [MIT License](../LICENSE). Copyright (c) 2026 Artem Litvinko.

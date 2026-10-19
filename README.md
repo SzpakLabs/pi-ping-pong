@@ -8,7 +8,7 @@ Give your coding agent a second pair of eyes—without copying messages between 
 
 **Pi · Goal / Ralph · Pi or Codex reviewer**
 
-[Get started](#get-started) · [Full guide](GUIDE.md) · [Roadmap](ROADMAP.md)
+[Get started](#get-started) · [Full guide](docs/GUIDE.md) · [Roadmap](docs/ROADMAP.md) · [Documentation](docs/README.md)
 
 </div>
 
@@ -41,7 +41,7 @@ For example: ask for a dark-mode toggle with tests. The worker builds it; checks
 
 ## Get started
 
-You'll need **macOS or Linux**, **Python 3.9+**, **Node.js 22.19+**, and a configured **Pi CLI with Goal/Ralph extensions and model access**. New to Pi? Follow the [requirements and dependency setup](GUIDE.md#requirements) first. Codex is optional for the Pi review route.
+You'll need **macOS or Linux**, **Python 3.9+**, **Node.js 22.19+**, and a configured **Pi CLI with Goal/Ralph extensions and model access**. New to Pi? Follow the [requirements and dependency setup](docs/GUIDE.md#requirements) first. Codex is optional for the Pi review route.
 
 ### 1. Install from the checkout
 
@@ -51,7 +51,7 @@ cd pi-ping-pong
 python3 scripts/install.py
 ```
 
-The installer copies the skill and Pi receiver, backing up differing files. Install Pi, Goal/Ralph, and credentials separately. [Installation details →](GUIDE.md#install)
+The installer copies the skill and Pi receiver, backing up differing files. Install Pi, Goal/Ralph, and credentials separately. [Installation details →](docs/GUIDE.md#install)
 
 ### 2. Describe your task in Pi
 
@@ -83,11 +83,11 @@ Run the same command again to start the prepared run:
 
 Check progress with `/ppp-status`. Use `/ppp` to open the runs menu. Feedback returns to this Pi conversation; keep Pi and the host running. A previously launched name shows status—use a new name for new work.
 
-Prefer reviewing in Codex? Follow the [Codex setup](GUIDE.md#quick-start-reviewer-in-codex).
+Prefer reviewing in Codex? Follow the [Codex setup](docs/GUIDE.md#quick-start-reviewer-in-codex).
 
 ## Know before you run
 
-**Local prototype.** Setup takes some terminal work; compatibility depends on your environment. [Validation status and limitations →](GUIDE.md#goal-and-ralph-modes)
+**Local prototype.** Setup takes some terminal work; compatibility depends on your environment. [Validation status and limitations →](docs/GUIDE.md#goal-and-ralph-modes)
 
 Both agents need access to the same files. They use your configured model access and can consume paid usage. A passing test or an AI saying “done” does not prove every requirement or visual detail is correct. Run limits do not provide an operating-system sandbox or grant commit, push, or deploy permission.
 
@@ -95,11 +95,11 @@ Both agents need access to the same files. They use your configured model access
 
 | Looking for… | Read |
 |---|---|
-| Setup, versions, daily commands, Codex, mobile, and limitations | [User guide](GUIDE.md) |
+| Setup, versions, daily commands, Codex, mobile, and limitations | [User guide](docs/GUIDE.md) |
 | Config files, review decisions, transport, and recovery boundaries | [Run contract](references/reviewed-runs.md) |
 | Instructions for your AI agent | [Skill](SKILL.md) |
-| Proposed future work and design | [Roadmap](ROADMAP.md) · [Target architecture](ARCHITECTURE.md) |
-| Development checks and maintenance rules | [Development guide](GUIDE.md#development-checks) · [AGENTS.md](AGENTS.md) |
+| Proposed future work and design | [Roadmap](docs/ROADMAP.md) · [Target architecture](docs/ARCHITECTURE.md) |
+| Development checks and maintenance rules | [Development guide](docs/GUIDE.md#development-checks) · [AGENTS.md](AGENTS.md) |
 
 ---
 

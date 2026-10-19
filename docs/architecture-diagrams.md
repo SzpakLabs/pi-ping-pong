@@ -2,7 +2,7 @@
 
 Date: 2026-10-18 · Architecture revision: 1
 
-This atlas is the **normative To-Be** view of the [target architecture](../ARCHITECTURE.md), not evidence that every component or transition is implemented. The architecture document owns decisions; the [roadmap](../ROADMAP.md) owns delivery order. The [run contract](reviewed-runs.md) describes current operation. Labels are conceptual unless they name an existing interface.
+This atlas is the **normative To-Be** view of the [target architecture](ARCHITECTURE.md), not evidence that every component or transition is implemented. The architecture document owns decisions; the [roadmap](ROADMAP.md) owns delivery order. The [run contract](../references/reviewed-runs.md) describes current operation. Labels are conceptual unless they name an existing interface.
 
 | View | Question answered | Architecture reference |
 |---|---|---|
@@ -406,4 +406,4 @@ Open questions (implementation mechanisms and material product choices remain un
 
 ## Maintenance
 
-Update affected diagrams when architecture ownership, state transitions, trust or delivery semantics change. Keep the architecture revision aligned with [ARCHITECTURE.md](../ARCHITECTURE.md). Diagrams explain the contract; source/tests/run artifacts establish implementation evidence. No runtime or policy change is authorized by adding a node or arrow.
+Update affected diagrams when architecture ownership, state transitions, trust or delivery semantics change. Keep the architecture revision aligned with [ARCHITECTURE.md](ARCHITECTURE.md). Diagrams explain the contract; source/tests/run artifacts establish implementation evidence. No runtime or policy change is authorized by adding a node or arrow.

@@ -24,7 +24,7 @@ The accepted scope comprises:
 
 All product UI is English. Stop controls, package installation improvements, archive/delete, `single`, spec-run, shared Trusted Artifact Generation and compact managing-chat callbacks were not added by this feature.
 
-The seven feature files are the [receiver](../extensions/pi-reviewed.ts), [bridge](../scripts/bridge.py), [receiver tests](../scripts/test_pi_receiver.mjs), [bridge tests](../scripts/test_bridge.py), [README](../README.md), [skill](../SKILL.md) and [run contract](reviewed-runs.md).
+The seven feature files are the [receiver](../extensions/pi-reviewed.ts), [bridge](../scripts/bridge.py), [receiver tests](../scripts/test_pi_receiver.mjs), [bridge tests](../scripts/test_bridge.py), [README](../README.md), [skill](../SKILL.md) and [run contract](../references/reviewed-runs.md).
 
 ## 2. Execution and acceptance process
 
@@ -145,7 +145,7 @@ There was no paired standalone comparison, fixed benchmark sample or measured co
 
 For this accepted implementation, update runtime copies and verify the visible footer/notifications after Pi reload. Keep visual acceptance distinct from the API tests already passed.
 
-The [roadmap](../ROADMAP.md) separately plans shared Trusted Artifact Generation and compact managing-chat callbacks. The run-local helper is only an experimental precursor. Future worktree use should remove shared-checkout collisions while preserving source-bound review and safe delivery checks. These follow-ups are not claimed as implemented by this feature.
+The [roadmap](ROADMAP.md) separately plans shared Trusted Artifact Generation and compact managing-chat callbacks. The run-local helper is only an experimental precursor. Future worktree use should remove shared-checkout collisions while preserving source-bound review and safe delivery checks. These follow-ups are not claimed as implemented by this feature.
 
 ## Evidence locations
 

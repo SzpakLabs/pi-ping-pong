@@ -14,8 +14,8 @@ The architectural unit is **one supervised run**, not a chat transcript or a mod
 |---|---|
 | This document | Desired component boundaries, ownership, invariants and extension rules. Changes to these decisions must be recorded here. |
 | [ROADMAP.md](ROADMAP.md) | Delivery order, agreed product priorities, milestone scope and exit evidence. This document does not reorder that queue. |
-| [references/reviewed-runs.md](references/reviewed-runs.md) | Current operational configuration, protocol and transport contract. Target interfaces here do not silently replace it. |
-| [README.md](README.md), [SKILL.md](SKILL.md) | Current entrypoints, setup and agent workflow. |
+| [references/reviewed-runs.md](../references/reviewed-runs.md) | Current operational configuration, protocol and transport contract. Target interfaces here do not silently replace it. |
+| [README.md](../README.md), [SKILL.md](../SKILL.md) | Current entrypoints, setup and agent workflow. |
 | Source, tests and dated run artifacts | Evidence of what actually exists or works. A design statement is not implementation evidence. |
 
 An implementation/specification conflict requires an explicit migration or a design correction. Preserve current consumers until that choice is documented and tested. The Artem_KB project note remains a discovery summary; detailed architecture lives here.
@@ -41,7 +41,7 @@ Core is a modular monolith with subprocess adapters. A module boundary does not 
 
 ## 3. System shape
 
-See the [key architecture diagrams](references/architecture-diagrams.md) for components, the review sequence, run states, trust boundaries, extension points and durable delivery. They visualize this target design; they do not establish implementation or live acceptance.
+See the [key architecture diagrams](architecture-diagrams.md) for components, the review sequence, run states, trust boundaries, extension points and durable delivery. They visualize this target design; they do not establish implementation or live acceptance.
 
 ```mermaid
 flowchart TD
