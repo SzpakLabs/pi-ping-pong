@@ -5,6 +5,11 @@
   "scripts": {
     "lint": "eslint extensions/*.ts scripts/*.mjs",
     "typecheck": "tsc --project tsconfig.json",
+    "check:python": "sh scripts/check-python.sh",
+    "check:ts": "sh scripts/check-ts.sh",
+    "check:bridge": "python3 -B scripts/test_action_bridge.py",
+    "check:faults": "python3 -B scripts/test_action_faults.py",
+    "check:integration": "sh scripts/check-integration.sh",
     "check": "sh scripts/check.sh"
   },
   "devDependencies": {

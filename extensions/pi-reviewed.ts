@@ -7,9 +7,9 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@e
 
 type Binding = { root: string; runId: string; sessionId: string };
 type Config = { run_id: string; review_model: string; review_provider?: string; [key: string]: unknown };
-type Envelope = { id: string; run_id: string; session_id: string; kind: string; message: string; receipt: string };
+type Envelope = { id: string; run_id: string; session_id: string; kind: string; message: string; receipt: string; trigger_turn?: boolean; notice_type?: string; report_key?: string; protocol_version?: number; schema_version?: number };
 type Project = { root: string; fallback: boolean; git: boolean };
-type RunState = 'draft/incomplete' | 'ready to launch' | 'starting' | 'running' | 'waiting review' | 'waiting human' | 'completed' | 'stopped' | 'attention required' | 'unknown/malformed';
+type RunState = 'draft/incomplete' | 'ready to launch' | 'starting' | 'running' | 'waiting review' | 'waiting human' | 'waiting resource' | 'waiting event' | 'completed' | 'stopped' | 'attention required' | 'unknown/malformed';
 type RunInfo = { name: string; dir?: string; state: RunState; mode?: string; worker?: string; reviewer?: string; details?: string; config?: Config };
 type LaunchWatch = { root: string; runId: string; deadline: number; notified?: string };
 const statusKey = 'pi-ping-pong';
@@ -23,7 +23,11 @@ function atomic(file: string, data: unknown) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   fs.chmodSync(temporary, 0o600);
+  const fd = fs.openSync(temporary, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(temporary, file);
+  const directory = fs.openSync(path.dirname(file), 'r');
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
 function isPrivate(stat: fs.Stats) { return (stat.mode & 0o077) === 0; }
 function regularFile(file: string) {
@@ -50,22 +54,15 @@ function regularPrivateRunFile(runDir: string, file: string) {
   }
   return false;
 }
-function evaluatorPath(runDir: string, argv: unknown): { file?: string; error?: string } {
-  if (!Array.isArray(argv) || !argv.every(value => typeof value === 'string' && value.length > 0)) {
-    return { error: 'eval_argv must be a non-empty string array' };
-  }
-  let script: string | undefined;
-  if (argv.length === 2 && argv[0] === 'python3') script = argv[1];
-  else if (argv.length === 3 && argv[0] === 'python3' && argv[1] === '-B') script = argv[2];
-  else return { error: 'unsupported eval_argv; use ["python3", "<script>"] or ["python3", "-B", "<script>"]' };
-  return { file: path.resolve(runDir, 'work', script!) };
-}
 function validRunName(name: string) { return name.length <= maxRunNameLength && runNamePattern.test(name); }
 function generatedRunName(task: string) {
   const slug = task.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
     .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'task';
   const suffix = createHash('sha256').update(task).digest('hex').slice(0, 8);
   return `${slug.slice(0, maxRunNameLength - suffix.length - 1).replace(/-+$/g, '')}-${suffix}`;
+}
+function hasSecret(value: string) {
+  return /(?:\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9_]{12,}|\bbearer\s+\S+|(?:api[_-]?key|secret|token)\s*[:=]\s*\S+)/i.test(value);
 }
 function displayValue(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
@@ -145,13 +142,13 @@ async function resolveProject(ctx: ExtensionContext): Promise<Project | undefine
     const root = execFileSync('git', ['-C', ctx.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: projectGitEnv() }).trim();
     return { root: fs.realpathSync(root), fallback: false, git: true };
   } catch {
-    if (!ctx.hasUI) {
-      ctx.ui.notify('No Git project root found. No project runs were read or created. Use a Git project or a UI-enabled Pi session to confirm a project folder/private fallback.', 'warning');
-      return undefined;
-    }
     const cwd = path.resolve(ctx.cwd);
-    if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory() && await ctx.ui.confirm('Use this folder as the project root?', `${cwd}\nNo Git repository was found. Confirm only if this is the intended project root.`)) {
+    if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
       return { root: fs.realpathSync(cwd), fallback: false, git: false };
+    }
+    if (!ctx.hasUI) {
+      ctx.ui.notify('Current project folder is unavailable. No project runs were read or created; select an existing project folder.', 'warning');
+      return undefined;
     }
     const fallback = path.join(os.homedir(), '.pi', 'reviewed-runs');
     if (await ctx.ui.confirm('Use the private fallback run store?', `No project root was confirmed. Named runs will be stored under ${fallback}/named/<name>/; existing legacy runs remain untouched.`)) {
@@ -164,9 +161,12 @@ function statusLabel(value: unknown): RunState | undefined {
   if (value === 'running') return 'running';
   if (value === 'starting') return 'starting';
   if (value === 'waiting_pi' || value === 'waiting_codex') return 'waiting review';
-  if (value === 'waiting_human') return 'waiting human';
+  if (value === 'waiting_human' || value === 'paused_budget') return 'waiting human';
+  if (value === 'waiting_resource') return 'waiting resource';
+  if (value === 'waiting_event') return 'waiting event';
   if (value === 'complete') return 'completed';
-  if (value === 'stopped') return 'stopped';
+  if (value === 'stopped' || value === 'cancelled') return 'stopped';
+  if (value === 'halted') return 'attention required';
   if (value === 'attention_required') return 'attention required';
   return undefined;
 }
@@ -203,21 +203,28 @@ function inspectRun(name: string, dir: string): RunInfo {
   }
   if (!config) return { name, dir, state: 'draft/incomplete', details: 'No config.json yet.' };
   const requiredStrings = [config.run_id, config.mode, config.worker_provider, config.worker_model, config.review_provider, config.review_model, config.task];
-  const bounds = ['max_cycles', 'cycle_seconds', 'review_seconds', 'wall_seconds'].map(key => config[key]);
-  const argv = config.eval_argv;
+  // Goal is bounded by wall/review seconds and goal_max_launches; cycle fields are optional there but still validated when set.
+  const bounds = ['max_cycles', 'cycle_seconds', 'review_seconds', 'wall_seconds'].filter(key => config.mode !== 'goal' || !['max_cycles', 'cycle_seconds'].includes(key) || config[key] !== undefined).map(key => config[key]);
   const taskFile = typeof config.task === 'string' ? path.resolve(dir, config.task) : '';
-  const evaluator = evaluatorPath(dir, argv);
   const incomplete: string[] = [];
   if (!requiredStrings.every(value => typeof value === 'string' && value.trim().length > 0)) incomplete.push('required config fields');
   if (!uuidPattern.test(String(config.run_id))) incomplete.push('UUID run_id');
-  if (!['goal', 'ralph'].includes(String(config.mode))) incomplete.push('mode');
+  if (!['goal', 'ralph', 'ping-pong'].includes(String(config.mode))) incomplete.push('mode');
   if (!bounds.every(value => Number.isSafeInteger(value) && Number(value) > 0)) incomplete.push('positive finite bounds');
-  if (evaluator.error) incomplete.push(evaluator.error);
+  for (const key of ['worker_extensions', 'reviewer_extensions']) {
+    const value = config[key];
+    if (value !== undefined && (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim() && !item.includes('\0')))) incomplete.push(`${key} must be a list of non-empty paths`);
+  }
+  if (config.eval_argv !== undefined) incomplete.push('eval_argv is obsolete; prepare without an evaluator');
   if (config.review_transport !== 'pi' || config.pi_session_id !== undefined || config.thread_id !== undefined) incomplete.push('unbound Pi config');
+  if (config.review_execution !== undefined && !['chat', 'headless'].includes(String(config.review_execution))) incomplete.push('valid review_execution');
+  if (config.review_execution === 'headless' && config.protocol_version !== 2) incomplete.push('protocol 2 for headless review');
   if (!inside(dir, taskFile) || !regularPrivateRunFile(dir, taskFile)) incomplete.push('private TASK file');
-  if (!evaluator.error && evaluator.file && (!inside(dir, evaluator.file) || !regularPrivateRunFile(dir, evaluator.file))) incomplete.push('private evaluator file');
   if (!regularPrivateFile(path.join(dir, 'config.json'))) incomplete.push('private config file');
-  if (!incomplete.length) return { name, dir, state: 'ready to launch', mode, worker, reviewer, details: 'TASK, independent eval, UUID run_id, models and finite limits are present.', config };
+  const version = config.protocol_version;
+  if (version !== 2) incomplete.push('protocol 2 required; evaluator-era runs are unsupported');
+  if (version === 2 && (config.schema_version !== 1 || !config.execution_contract || typeof config.execution_contract !== 'object')) incomplete.push('protocol 2 schema/contract');
+  if (!incomplete.length) return { name, dir, state: 'ready to launch', mode, worker, reviewer, details: 'TASK, UUID run_id, models and finite limits are present.', config };
   return { name, dir, state: 'draft/incomplete', mode, worker, reviewer, details: `Preparation is incomplete: ${incomplete.join(', ')}.`, config };
 }
 function listRuns(project: Project): RunInfo[] {
@@ -273,7 +280,27 @@ function draftFiles(dir: string) {
 }
 function preparationPrompt(project: Project, name: string, dir: string, continuation: boolean, reviewerDefault: string, taskDescription = '') {
   const files = continuation ? draftFiles(dir).filter(file => file !== '.draft.json') : [];
-  return `Prepare a Pi Ping Pong run from this conversation. Reuse all task details, criteria, project context, and decisions already provided; ask only concise grouped questions for missing information. The run name is an identifier, not a complete task description. Do not start or launch the worker during preparation.\n\n${taskDescription ? `Task requested in the command: ${taskDescription}\n\n` : ''}Confirmed project root: ${project.root}\nSelected run name: ${name}\nExact reserved private run directory: ${dir}\n${project.fallback ? 'This is the explicitly confirmed private fallback store; do not use the project cwd.' : ''}\n${continuation ? `This is an incomplete existing run. Existing entries (read each listed regular file into context before deciding whether any change is needed): ${files.length ? files.join(', ') : '(none)'}. Do not overwrite existing files blindly; preserve valid content and write only missing/verified updates. It has never been launched, and this preparation must not touch any launched run/evidence.` : 'This directory was exclusively reserved for this new run.'}\n\nWrite only this run's TASK.md, config.json, and independent task-specific eval.py inside the exact reserved directory above. Do not use another run directory, do not create run files elsewhere, and do not overwrite .draft.json. Use already supplied conversation data; if essential inputs remain missing, ask instead of writing placeholder/fake values. Confirm the project root and allowed filesystem paths with the user; only the approved target paths may be modified by the worker.\n\nThe prepared TASK.md must state the actual task and independently checkable acceptance criteria. config.json must contain a unique RFC 4122 UUID run_id (UUID is for run_id only; do not put a UUID in the folder name), mode goal|ralph, worker_provider, worker_model, and thinking using the approved defaults unless the user explicitly requested alternatives, review_provider and review_model set to the current Pi model (${reviewerDefault}); use it without confirmation unless no model is selected or the user explicitly requests a different reviewer, the task path, eval_argv invoking the evaluator by its absolute path, and positive finite integer max_cycles, cycle_seconds, review_seconds, and wall_seconds. Unless the user requested different values, default worker_provider to openai-codex, worker_model to gpt-6-luna, thinking to low, and max_cycles to 10; these are approved defaults, so do not ask the user to confirm them. Use a different model or limit only when the user explicitly asks. Do not invent an eval that always succeeds. The independent evaluator must check actual task-specific outputs/state, map every acceptance criterion to a check, and return nonzero for unmet criteria; clarify criteria that cannot be independently evaluated. Use review_transport=pi. Do not write pi_session_id, create launch-attempt.json, or attach a session entry; the launcher binds the session only when explicitly launched.\n\nKeep all run artifacts private: directory mode 0700 and TASK.md, config.json, eval.py mode 0600. Ensure paths are inside this exact run directory except explicitly user-approved task target paths. Do not copy secrets. Do not run the worker, Goal/Ralph, bridge, evaluator, or paid model-backed checks as part of preparation.\n\nWhen ready, report the task, checkable criteria, mode, worker/reviewer provider and models, allowed paths, evaluator command and criterion mapping, finite limits, exact run directory and config path. State explicitly that no worker was started and give the explicit launch command \`/pi-ping-pong ${name}\`. If incomplete, report only missing inputs and preserve the draft for continuation.`;
+  return `Prepare a Pi Ping Pong run from this conversation. Reuse all task details, criteria, project context, and decisions already provided; ask only concise grouped questions for genuinely missing inputs. Do not start or launch the worker during preparation.
+
+${taskDescription ? `Task requested in the command: ${taskDescription}\n` : ''}${project.fallback ? 'Private fallback store root (not a product target)' : 'Confirmed project root'}: ${project.root}
+Selected run name: ${name}
+Exact reserved private run directory: ${dir}
+${project.fallback ? 'Use this explicitly confirmed private fallback store, not the project cwd.' : ''}
+${continuation ? `This is an incomplete existing run. Read existing entries before updating: ${files.join(', ')}. Do not overwrite existing files blindly; preserve valid content. Never touch launched run artifacts.` : 'This directory was exclusively reserved for this new run.'}
+
+Write only TASK.md and config.json inside the exact reserved run directory. Do not overwrite .draft.json or write task outputs during preparation. Do not create eval.py, eval_argv or any separate evaluator/preflight. Worker implements the task and runs ordinary tests; independent Reviewer assesses only what tests cannot establish and concrete defects; Core validates and decides. Chat A receives reports, never becomes Core. No mandatory model preflight or pre/post review repeats.
+
+TASK.md must state actual user requirements, allowed paths, checkable acceptance criteria and ordinary test commands where known. Work in the selected current project with its actual uncommitted changes. For a new project use the confirmed repository root as product target (a private fallback store is not a product target; take the actual authorized target from the task, ask only if missing); modify an existing project in place; respect an explicitly requested subdirectory or file. Record absolute product target and project command cwd in TASK.md and use that actual path in execution_contract.target. .pi-ping-pong run/work is service storage only, never the default product directory. No mandatory auto-commit, clean Git, separate worktree, fetch or routine approval. Preserve unrelated user changes and existing untracked/ignored local configuration; do not read or copy secrets. A bounded launch snapshot is fallback discovery only, not a preflight or proof of authorship/tests/acceptance; missing or partial snapshots must not block work or delivery. Expected behavior follows the actual requirement and observed before/after state, including multiplicities; a merely changed value is not enough. Do not invent names, selectors, storage formats, scenarios or approvals. Missing checks are unknown/not_tested, not automatic product failures. Worker retains test commands, exits, output and relevant artifacts with its checkpoint; Reviewer uses those results without rerunning or re-proving deterministic checks. Missing review evidence must not hide available work or prevent independent authorized work. Report delivery separately from verified acceptance.
+
+For browser tasks, determine one usable Playwright route when practical: prefer explicitly configured/project-installed runtime, then ordinary installed Pi-accessible runtime. Verify module resolution/browser availability where practical without a model or installing dependencies. Record actual command/module resolution and cwd in TASK.md for both Goal and Ralph. Core resolves the module once and passes its absolute entry as PPP_PLAYWRIGHT_MODULE to Worker; prefer require(process.env.PPP_PLAYWRIGHT_MODULE). Module resolution does not establish browser/auth availability. Do not hardcode a host-specific path or make availability a launch gate; record the limitation and continue independent work.
+
+Use protocol_version=2 and schema_version=1. config.json needs a unique RFC 4122 UUID run_id (not the folder name), mode goal|ralph|ping-pong, worker_provider, worker_model, thinking, review_provider, review_model, task and positive finite integer review_seconds, wall_seconds, plus max_cycles and cycle_seconds for ralph/ping-pong (optional for goal, which is bounded by wall_seconds, goal_max_launches and optional goal_tokens). Defaults: worker_provider=openai-codex, worker_model=gpt-6-luna, thinking=low, max_cycles=10 unless user requested alternatives; do not ask to confirm approved defaults. Review provider/model default to the current Pi model (${reviewerDefault}), without confirmation unless missing or explicitly overridden. Use review_transport=pi and review_execution=headless for a separate Core-owned read-only Reviewer session; its model need not match Chat A at launch.
+
+Include execution_contract: target (absolute authorized output/source path for filesystem tasks), actions (stable id, description, depends_on, pre-authorized operations), complete criteria ID/description map, closure={authorized:true,max_cycles:null} only where actual initial task authority permits closure, reminder_seconds=86400 unless configured otherwise. Cwd/Git ancestry grants no authority. Retain actual scope, approval and side-effect restrictions. Never fabricate closure authorization, identity, human input or budget. Old evaluator-era runs cannot resume with this implementation; preserve their files, do not migrate them silently.
+
+Keep the complete run-storage chain private 0700; TASK.md and config.json mode 0600. No secrets. Do not write pi_session_id, launch-attempt.json or session entries; explicit launch binds identity. Do not run Worker, Goal/Ralph, bridge run, or paid/live checks during preparation.
+
+Report task, criteria and ordinary tests, mode, worker/reviewer models, allowed paths, finite limits, exact run/config paths and limitations. State no worker started; give explicit launch command \`/pi-ping-pong ${name}\`. Incomplete: list grouped genuine missing inputs and preserve draft. Visible report: standalone STATUS — line; blank lines around separate headings ### TL;DR, ### Summary, ### Report, ### Suggested action, ### Full run status. Put content below headings; short paragraphs/bullets, commands in fenced text. Use available facts only; no extra reads just to fill status.`;
 }
 function sendPreparation(pi: ExtensionAPI, ctx: ExtensionCommandContext, project: Project, name: string, dir: string, continuation: boolean, taskDescription = '') {
   try { verifyNamedRun(project, name, dir); }
@@ -303,12 +330,12 @@ function details(info: RunInfo) {
 function formatRun(info: RunInfo) {
   return `${info.name} — ${info.state} — ${info.mode ?? 'mode unknown'} — ${info.worker ?? 'worker unknown'}`;
 }
-function detailedStatus(info: RunInfo, binding?: Binding) {
+function statusView(info: RunInfo, binding?: Binding) {
   const root = info.dir ?? binding?.root;
   const config = info.config;
-  let state: { run_id?: unknown; status?: unknown; phase?: unknown; cycle?: unknown; max_cycles?: unknown; started_at?: unknown; updated_at?: unknown; reason?: unknown } | undefined;
+  let state: { run_id?: unknown; status?: unknown; outcome?: unknown; phase?: unknown; cycle?: unknown; max_cycles?: unknown; started_at?: unknown; updated_at?: unknown; reason?: unknown; main_remaining?: unknown; worker_tokens?: unknown; goal_usage_status?: unknown; blockers?: { id: string; status: string; escalation: string; needed: string }[] } | undefined;
   const validatedRunId = safeRunId(config?.run_id) && (!binding || (safeRunId(binding.runId) && binding.runId === config.run_id));
-  const validatedInfoState = ['running', 'starting', 'waiting review', 'waiting human', 'completed', 'stopped', 'attention required'].includes(info.state);
+  const validatedInfoState = ['running', 'starting', 'waiting review', 'waiting human', 'waiting resource', 'waiting event', 'completed', 'stopped', 'attention required'].includes(info.state);
   const invalidLifecycleIdentity = validatedInfoState && (!validatedRunId || (binding !== undefined && binding.runId !== config?.run_id));
   if (root && validatedRunId && validatedInfoState) {
     try {
@@ -334,10 +361,25 @@ function detailedStatus(info: RunInfo, binding?: Binding) {
   const elapsed = duration(state?.started_at);
   const age = duration(state?.updated_at);
   const reason = state?.reason === undefined ? '' : `Reason: ${displayValue(state.reason)}`;
-  const next = label === 'completed' ? 'No further action.' : label === 'attention required' || label === 'unknown/malformed' ? 'Inspect saved state and launcher.log; do not relaunch automatically.' : label === 'waiting human' ? 'Provide the requested input in the reviewer session.' : label === 'waiting review' ? 'Review the pending checkpoint.' : label === 'ready to launch' ? 'Launch explicitly when ready.' : 'Monitor local status; no action is required.';
+  const next = label === 'completed' ? 'No further action.' : label === 'stopped' && state?.outcome === 'delivered_unverified' ? 'Result delivered, not verified (not acceptance); no further stage starts. Check the unverified criteria yourself if needed.' : label === 'attention required' || label === 'unknown/malformed' ? 'Inspect saved state and launcher.log; do not relaunch automatically.' : label === 'waiting resource' || label === 'waiting event' ? 'No Worker is running; awaiting the recorded resource/event or scheduled check, not a review reply.' : label === 'waiting human' ? config?.review_execution === 'headless' ? 'Reply in Chat A using /ppp-respond; choose the run and request, then confirm your instruction. No JSON is needed.' : 'Provide the requested input in the reviewer session.' : label === 'waiting review' ? config?.review_execution === 'headless' ? 'Independent Reviewer is running; no human reply is needed.' : 'Review the pending checkpoint.' : label === 'ready to launch' ? 'Launch explicitly when ready.' : 'Monitor local status; no action is required.';
+  const goalUsageUnknown = config?.mode === 'goal' && state?.goal_usage_status !== 'known';
+  const mainRemaining = goalUsageUnknown ? 'unknown (actual Goal usage unavailable)' : displayValue(state?.main_remaining);
+  const goalUsage = config?.mode === 'goal' ? `Goal tokens: ${displayValue(state?.worker_tokens)} recorded${goalUsageUnknown ? '; actual usage unknown (recorded value is a lower bound)' : ''}` : '';
+  return { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, goalUsage };
+}
+function compactStatus(info: RunInfo, binding?: Binding) {
+  const view = statusView(info, binding);
+  const detail = view.reason || (['unknown/malformed', 'draft/incomplete', 'attention required'].includes(view.label) ? info.details : '');
+  return [`${info.name} — ${view.label}`, `Cycles: ${view.cycle}${view.config?.protocol_version === 2 ? ` · Main remaining: ${view.mainRemaining}` : `/${view.maximum}`}`,
+    ...(view.goalUsage ? [view.goalUsage] : []), ...(detail ? [detail] : []), `Next: ${view.next}`].join('\n');
+}
+function detailedStatus(info: RunInfo, binding?: Binding) {
+  const { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, goalUsage } = statusView(info, binding);
   return [
     `${info.name}: ${label} (phase ${phase})`,
     `Mode: ${info.mode ?? 'unavailable'}; cycle ${cycle}/${maximum}; elapsed ${elapsed}; state age ${age}`,
+    ...(config?.protocol_version === 2 ? [`Protocol: 2/schema 1; cumulative ledger: ${root ? path.join(root, 'execution-state.json') : 'unavailable'}`, `Main remaining: ${mainRemaining}; closure uses separate initial authority. Initial max_cycles is not a cumulative total.`, ...(Array.isArray(state?.blockers) ? state.blockers.map(b => `${displayValue(b.id)}: ${displayValue(b.status)} / ${displayValue(b.escalation)} — ${displayValue(b.needed)}`) : []), 'Human input: /ppp-respond opens a confirmed action menu; questions are not authorizations. Advanced: /ppp-respond <run-id> <JSON>.'] : []),
+    ...(goalUsage ? [goalUsage] : []),
     `Worker: ${info.worker ?? 'unavailable'}`,
     `Reviewer: ${info.reviewer ?? 'unavailable'}`,
     `Directory: ${root ?? 'unavailable'}`,
@@ -381,7 +423,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     for (const binding of bindings) {
       if (sessionId !== binding.sessionId) continue;
       let config: Config | undefined;
-      let state: { run_id?: string; status?: string; phase?: string; cycle?: number; max_cycles?: number; started_at?: number; updated_at?: number; reason?: unknown; pi_session?: string } | undefined;
+      let state: { run_id?: string; status?: string; outcome?: string; phase?: string; cycle?: number; max_cycles?: number; started_at?: number; updated_at?: number; reason?: unknown; pi_session?: string; controller_pid?: number; main_remaining?: number } | undefined;
       try {
         if (!safeRunId(binding.runId)) throw new Error('invalid binding run_id');
         config = read<Config>(path.join(binding.root, 'config.json'));
@@ -390,10 +432,10 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         if (!state || state.run_id !== binding.runId) throw new Error('state identity mismatch');
       } catch { state = undefined; }
       const launchWatch = launchWatches.get(binding.runId);
-      if (launchWatch && state && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'complete', 'stopped'].includes(String(state.status))
-        && typeof state.pi_session === 'string' && state.pi_session.trim().length > 0 && config?.run_id === binding.runId) {
+      if (launchWatch && state && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'waiting_resource', 'waiting_event', 'complete', 'stopped'].includes(String(state.status))
+        && ((typeof state.pi_session === 'string' && state.pi_session.trim().length > 0) || (config?.protocol_version === 2 && Number.isSafeInteger(state.controller_pid) && state.controller_pid! > 0)) && config?.run_id === binding.runId) {
         launchWatches.delete(binding.runId);
-        ctx.ui.notify(`Pi Ping Pong ${binding.runId}: worker/session startup confirmed.`, 'info');
+        ctx.ui.notify(`Pi Ping Pong ${binding.runId}: ${config?.protocol_version === 2 ? 'controller startup confirmed; workers follow verified action selection' : 'worker/session startup confirmed'}.`, 'info');
       }
       const status = state ? String(state.status ?? '') : 'unknown';
       const notificationState = statusLabel(state?.status);
@@ -427,11 +469,13 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       }
       const statusForDisplay = status === 'running' && state?.phase === 'evaluating' ? 'evaluating' : status;
       const phase = status === 'starting' ? 'starting' : status === 'running' ? (statusForDisplay === 'evaluating' ? 'evaluating' : 'working')
+        : status === 'waiting_resource' ? 'awaiting resource (Worker idle)' : status === 'waiting_event' ? 'awaiting event (Worker idle)'
         : ['waiting_pi', 'waiting_codex'].includes(status) ? 'awaiting review' : status === 'waiting_human' ? 'awaiting your input'
-        : status === 'complete' ? 'completed' : status === 'stopped' ? 'stopped' : status === 'attention_required' ? 'attention' : 'unknown';
+        : status === 'paused_budget' ? 'main budget paused' : status === 'halted' ? 'halted' : status === 'cancelled' ? 'cancelled'
+        : status === 'complete' ? 'completed' : status === 'stopped' ? (state?.outcome === 'delivered_unverified' ? 'delivered, not verified' : 'stopped') : status === 'attention_required' ? 'attention' : 'unknown';
       const maximum = Number.isSafeInteger(state?.max_cycles) && state!.max_cycles! > 0 ? state!.max_cycles : config?.max_cycles;
       const cycle = state && Number.isSafeInteger(state.cycle) && state.cycle! >= 0
-        ? ` ${state.cycle}${Number.isSafeInteger(maximum) && Number(maximum) > 0 ? `/${maximum}` : ''}` : '';
+        ? config?.protocol_version === 2 ? ` cycles=${state.cycle} main=${displayValue(state.main_remaining)}` : ` ${state.cycle}${Number.isSafeInteger(maximum) && Number(maximum) > 0 ? `/${maximum}` : ''}` : '';
       const started = state?.started_at;
       const elapsed = typeof started === 'number' && Number.isFinite(started) && started >= 0
         ? ` ${Math.floor(Math.max(0, Date.now() / 1000 - started) / 60)}m${String(Math.floor(Math.max(0, Date.now() / 1000 - started) % 60)).padStart(2, '0')}s` : ' elapsed unavailable';
@@ -448,6 +492,17 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         const inbox = path.join(binding.root, 'pi-inbox');
         if (!fs.existsSync(inbox)) continue;
         const pending = fs.readdirSync(inbox).filter(name => name.endsWith('.message.json')).sort();
+        const stateReport = (e: Envelope) => config.protocol_version === 2 && config.review_execution === 'headless'
+          && e.run_id === binding.runId && e.session_id === sessionId && e.protocol_version === 2 && e.schema_version === 1
+          && e.kind === 'notice' && e.notice_type === 'reporter' && e.trigger_turn === true && e.report_key === 'state'
+          && typeof e.id === 'string' && e.id.length > 0 && typeof e.message === 'string' && e.message.length > 0;
+        let newestStateReport: string | undefined;
+        for (const name of pending) {
+          const file = path.join(inbox, name);
+          if (fs.existsSync(file.replace(/\.message\.json$/, '.delivery.json'))) continue;
+          try { if (stateReport(read<Envelope>(file))) newestStateReport = name; }
+          catch { /* Malformed messages cannot supersede valid reports. */ }
+        }
         for (const name of pending) {
           const file = path.join(inbox, name);
           const ack = file.replace(/\.message\.json$/, '.delivery.json');
@@ -457,20 +512,39 @@ export default function reviewedRuns(pi: ExtensionAPI) {
             atomic(ack, { status: 'rejected_identity' });
             continue;
           }
-          if (ctx.model?.id !== config.review_model || (config.review_provider && ctx.model?.provider !== config.review_provider)) {
+          if (config.protocol_version === 2 && (envelope.protocol_version !== 2 || envelope.schema_version !== 1 || (envelope.kind === 'notice' && envelope.trigger_turn === false && !['waiting', 'terminal', 'report'].includes(String(envelope.notice_type))))) {
+            atomic(ack, { status: 'rejected_schema', session_id: sessionId, id: envelope.id });
+            continue;
+          }
+          const passive = config.protocol_version === 2 && envelope.kind === 'notice' && envelope.trigger_turn === false;
+          if (config.protocol_version === 2 && state && ['cancelled', 'halted', 'complete', 'stopped'].includes(String(state.status)) && (envelope.kind === 'review' || envelope.notice_type === 'waiting')) {
+            atomic(ack, { status: 'suppressed_terminal', session_id: sessionId, id: envelope.id });
+            continue;
+          }
+          const reporter = config.protocol_version === 2 && config.review_execution === 'headless' && envelope.kind === 'notice' && envelope.notice_type === 'reporter' && envelope.trigger_turn === true;
+          if (stateReport(envelope) && newestStateReport && name !== newestStateReport) {
+            atomic(ack, { status: 'superseded_report', session_id: sessionId, id: envelope.id, superseded_by: newestStateReport });
+            continue;
+          }
+          if (!passive && !reporter && config.review_execution === 'headless') {
+            atomic(ack, { status: 'rejected_headless_model_turn', session_id: sessionId, id: envelope.id });
+            continue;
+          }
+          if (!passive && !reporter && (ctx.model?.id !== config.review_model || (config.review_provider && ctx.model?.provider !== config.review_provider))) {
             if (!warned.has(binding.runId)) {
               ctx.ui.notify(`Reviewed run ${binding.runId}: checkpoint held; select ${config.review_model} to review.`, 'warning');
               warned.add(binding.runId);
             }
+            if (config.protocol_version === 2) continue;
             break;
           }
           atomic(ack, { status: 'dispatching', session_id: sessionId, id: envelope.id });
           pi.sendMessage({
-            customType: 'reviewed-checkpoint',
+            customType: reporter ? 'reviewed-report-request' : 'reviewed-checkpoint',
             content: envelope.message.replaceAll('Codex', 'reviewer').replaceAll('this chat', 'this Pi session'),
-            display: true,
+            display: !reporter,
             details: { run_id: binding.runId, message_id: envelope.id, kind: envelope.kind },
-          }, { deliverAs: 'followUp', triggerTurn: true });
+          }, { deliverAs: 'followUp', triggerTurn: !passive });
           atomic(ack, { status: 'enqueued_in_pi', session_id: sessionId, id: envelope.id, at: Date.now() });
         }
       } catch (error) {
@@ -515,16 +589,28 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     if (path.basename(file) !== 'config.json') throw new Error('Expected an existing config.json path.');
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error(`Config not found: ${file}`);
     const root = path.dirname(file);
+    // Explicit project paths must obey the same storage checks as named launches.
+    if (path.basename(path.dirname(root)) === 'runs' && path.basename(path.dirname(path.dirname(root))) === '.pi-ping-pong') {
+      assertPrivateDirectoryChain(path.dirname(path.dirname(path.dirname(root))), root, false);
+    }
+    if (!regularPrivateFile(file)) throw new Error('Config must be a private regular non-symlink file.');
     const config = read<Config>(file);
-    if (!config.run_id || !config.review_model || !['goal', 'ralph'].includes(String(config.mode))) throw new Error('Config needs run_id, mode=goal|ralph and review_model.');
-    if (ctx.model?.id !== config.review_model) throw new Error(`Select reviewer model ${config.review_model} before launch.`);
-    if (config.review_provider && ctx.model?.provider !== config.review_provider) throw new Error(`Select reviewer provider ${config.review_provider} before launch.`);
+    if (!config.run_id || !config.review_model || !['goal', 'ralph', 'ping-pong'].includes(String(config.mode))) throw new Error('Config needs run_id, mode=goal|ralph|ping-pong and review_model.');
+    const headless = config.review_execution === 'headless';
+    if (config.review_execution !== undefined && !['chat', 'headless'].includes(String(config.review_execution))) throw new Error('Unknown review_execution.');
+    if (headless && (config.protocol_version !== 2 || typeof config.review_provider !== 'string' || !config.review_provider.trim())) throw new Error('Headless review needs protocol 2 and explicit review_provider.');
+    if (!headless && ctx.model?.id !== config.review_model) throw new Error(`Select reviewer model ${config.review_model} before launch.`);
+    if (!headless && config.review_provider && ctx.model?.provider !== config.review_provider) throw new Error(`Select reviewer provider ${config.review_provider} before launch.`);
     const attemptFile = path.join(root, 'launch-attempt.json');
-    if (fs.existsSync(attemptFile) || fs.existsSync(path.join(root, 'bridge-status.json'))) throw new Error('Run already launched; inspect its state instead of replaying it.');
+    if (fs.existsSync(attemptFile) || fs.existsSync(path.join(root, 'bridge-status.json')) || config.pi_session_id) throw new Error('Run already launched; inspect its state instead of replaying it.');
+    const script = process.env.PI_PING_PONG_BRIDGE || path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py');
+    if (config.protocol_version !== 2 || config.eval_argv !== undefined) throw new Error('Evaluator-era configs are unsupported; prepare a new protocol 2 run without eval_argv. Old run files are preserved.');
+    const task = typeof config.task === 'string' ? path.resolve(root, config.task) : '';
+    if (!regularPrivateRunFile(root, task)) throw new Error('Launch needs a private TASK file inside the run.');
     const sessionId = ctx.sessionManager.getSessionId();
     config.review_transport = 'pi';
     config.pi_session_id = sessionId;
-    config.review_provider = ctx.model.provider;
+    if (!headless) config.review_provider = ctx.model!.provider;
     delete config.thread_id;
     let attemptFd: number;
     try { attemptFd = fs.openSync(attemptFile, 'wx', 0o600); }
@@ -542,7 +628,6 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     context = ctx;
     pi.appendEntry(entryType, binding);
     startTimer();
-    const script = process.env.PI_PING_PONG_BRIDGE || path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py');
     const logFile = path.join(root, 'launcher.log');
     const fd = fs.openSync(logFile, 'a', 0o600);
     fs.fchmodSync(fd, 0o600);
@@ -563,13 +648,13 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         const watch = launchWatches.get(config.run_id);
         if (!watch || watch.root !== root) return;
         try {
-          const state = read<{ run_id?: string; status?: string; pi_session?: string }>(path.join(root, 'bridge-status.json'));
+          const state = read<{ run_id?: string; status?: string; pi_session?: string; controller_pid?: number }>(path.join(root, 'bridge-status.json'));
           const bound = read<Config>(file);
           if (state.run_id === config.run_id && bound.run_id === config.run_id && bound.pi_session_id === sessionId
-            && bound.review_transport === 'pi' && typeof state.pi_session === 'string' && state.pi_session.trim().length > 0
-            && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'complete', 'stopped'].includes(String(state.status))) {
+            && bound.review_transport === 'pi' && ((typeof state.pi_session === 'string' && state.pi_session.trim().length > 0) || (bound.protocol_version === 2 && Number.isSafeInteger(state.controller_pid) && state.controller_pid! > 0))
+            && ['running', 'waiting_pi', 'waiting_codex', 'waiting_human', 'waiting_resource', 'waiting_event', 'complete', 'stopped'].includes(String(state.status))) {
             launchWatches.delete(config.run_id);
-            ctx.ui.notify(`Pi Ping Pong ${config.run_id}: worker/session startup confirmed.`, 'info');
+            ctx.ui.notify(`Pi Ping Pong ${config.run_id}: ${config.protocol_version === 2 ? 'controller startup confirmed; workers follow verified action selection' : 'worker/session startup confirmed'}.`, 'info');
             return;
           }
         } catch { /* Missing startup state is diagnosed below. */ }
@@ -667,19 +752,181 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     sendPreparation(pi, ctx, project, name, reserved, false, taskDescription);
   }
 
+  // Grant cycles map to native Goal launches; each also adds goal_tokens when that optional cap is configured.
+  function goalGrantText(config: Config, count: number, prefix = ''): string | undefined {
+    const launches = `${count.toLocaleString('en-US')} ${prefix}Goal ${count === 1 ? 'launch' : 'launches'}`;
+    if (config.goal_tokens === undefined || config.goal_tokens === null) return launches;
+    const tokens = Number(config.goal_tokens) * count;
+    return Number.isSafeInteger(Number(config.goal_tokens)) && Number(config.goal_tokens) > 0 && Number.isSafeInteger(tokens) ? `${launches} and ${tokens.toLocaleString('en-US')} ${prefix}Goal tokens` : undefined;
+  }
+  type HumanState = { run_id: string; execution: string; wait?: { source?: string; reference?: string } | null; blockers: Record<string, { status?: string; needed?: string }>; requests: Record<string, { main_extension: boolean; main_grant_count?: number; blocker_ids?: string[] }>; grants: { request_id?: string; scope?: string; authority?: string; max_cycles?: number | null; goal_token_windows?: number }[] };
+  function humanState(binding: Binding, sessionId: string) {
+    const config = read<Config>(path.join(binding.root, 'config.json'));
+    if (config.protocol_version !== 2 || config.schema_version !== 1 || config.pi_session_id !== sessionId || config.run_id !== binding.runId || (config.human_transport !== undefined && config.human_transport !== 'pi')) throw new Error('Protocol/session/human-channel identity mismatch; legacy approvals remain unchanged.');
+    const state = read<HumanState>(path.join(binding.root, 'execution-state.json'));
+    if (state.run_id !== binding.runId || ['halt', 'stop', 'finish', 'cancelled'].includes(state.execution)) throw new Error('Terminal/wrong run: late responses cannot restart it.');
+    return state;
+  }
+  async function humanDialog(binding: Binding, ctx: ExtensionCommandContext): Promise<Record<string, unknown> | undefined> {
+    const state = humanState(binding, ctx.sessionManager.getSessionId());
+    const choices: { label: string; instruction: Record<string, unknown> }[] = [];
+    for (const [id, request] of Object.entries(state.requests)) {
+      for (const bid of request.blocker_ids ?? []) {
+        const blocker = state.blockers[bid];
+        if (blocker?.status === 'open' && !choices.some(choice => (choice.instruction.blocker_ids as string[] | undefined)?.includes(bid))) {
+          choices.push({ label: `Answer request: ${blocker.needed ?? bid} (${bid})`, instruction: { kind: 'resolution', blocker_ids: [bid] } });
+        }
+      }
+      if (request.main_extension && state.wait?.source === 'human-response' && state.wait.reference === id && request.main_grant_count === state.grants.length && !state.grants.some(grant => grant.request_id === id)) {
+        const config = read<Config>(path.join(binding.root, 'config.json'));
+        if (config.mode === 'goal' && goalGrantText(config, 3)) {
+          for (const count of [1, 3]) choices.push({ label: `Continue work — add ${goalGrantText(config, count)}`, instruction: { kind: 'grant', request_id: id, cycles: count, message: 'Continue work with the selected additional Goal budget.' } });
+          choices.push({ label: 'Continue work — choose another number of Goal launches', instruction: { kind: 'grant', request_id: id } });
+        } else if (config.mode === 'ralph' || config.mode === 'ping-pong') {
+          for (const count of [1, 3]) choices.push({ label: `Continue work — add ${count} Worker ${count === 1 ? 'iteration' : 'iterations'}`, instruction: { kind: 'grant', request_id: id, cycles: count, message: 'Continue work with the selected additional Worker iterations.' } });
+          choices.push({ label: 'Continue work — choose another number of Worker iterations', instruction: { kind: 'grant', request_id: id } });
+        } else {
+          throw new Error('Cannot show a budget choice: run mode or Goal token budget is invalid.');
+        }
+      }
+    }
+    choices.push({ label: 'Send a message to Core (not a resolution or budget grant)', instruction: { kind: 'signal' } },
+      { label: 'Cancel this run', instruction: { kind: 'cancel' } },
+      { label: 'Halt this run', instruction: { kind: 'halt' } });
+    const explain = 'Explain current status (no changes)';
+    const action = await ctx.ui.select(`Respond to ${path.basename(binding.root)}`, [explain, ...choices.map(choice => choice.label)]);
+    if (!action) return;
+    if (action === explain) {
+      ctx.ui.notify(compactStatus(inspectRun(path.basename(binding.root), binding.root), binding), 'info');
+      return;
+    }
+    const choice = choices.find(item => item.label === action);
+    if (!choice) return;
+    const input = { ...choice.instruction };
+    if (input.kind === 'grant' && input.cycles === undefined) {
+      const config = read<Config>(path.join(binding.root, 'config.json'));
+      const goal = config.mode === 'goal';
+      const perLaunch = config.goal_tokens === undefined || config.goal_tokens === null ? '' : ` Each launch also adds ${Number(config.goal_tokens).toLocaleString('en-US')} Goal tokens.`;
+      const count = await ctx.ui.input(goal ? 'How many more Goal launches?' : 'How many more Worker iterations?', goal ? `Enter a positive whole number. Each launch can start one new native Goal.${perLaunch}` : 'Enter a positive whole number. Reviews do not use these iterations.');
+      if (count === undefined) return;
+      const amount = Number(count.replaceAll(',', '').trim());
+      if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)$/.test(count.trim()) || !Number.isSafeInteger(amount) || amount <= 0 || (goal && !goalGrantText(config, amount))) throw new Error(goal ? 'Enter a positive whole number of Goal launches. No budget was added.' : 'Enter a positive whole number of Worker iterations. No budget was added.');
+      input.cycles = amount;
+      input.message = goal ? 'Continue work with the selected additional Goal budget.' : 'Continue work with the selected additional Worker iterations.';
+    }
+    if (input.kind === 'grant') return input;
+    const message = await ctx.ui.input(input.kind === 'resolution' ? 'Your answer: what changed or was configured?' : 'Describe your instruction', 'Ordinary text, no JSON or secrets. A response is independently checked.');
+    if (message === undefined) return;
+    input.message = message;
+    return input;
+  }
+  pi.registerCommand('ppp-respond', {
+    description: 'Choose a run and human action without JSON; confirm before recording. Advanced: <run-id> <JSON>. Never paste secrets.',
+    handler: async (args, ctx) => {
+      try {
+        if (!ctx.hasUI || ctx.mode !== 'tui') throw new Error('Human authority requires the interactive receiver confirmation, not a worker/RPC flag.');
+        const sessionId = ctx.sessionManager.getSessionId();
+        const argument = args.trim();
+        const match = /^(\S+)\s+(\{[\s\S]*)$/.exec(argument);
+        let binding: Binding | undefined;
+        let input: Record<string, unknown> | undefined;
+        if (match) {
+          binding = bindings.find(b => b.runId === match[1] && b.sessionId === sessionId);
+          if (!binding) throw new Error('No run attached to this receiver session.');
+          try { input = JSON.parse(match[2]) as Record<string, unknown>; }
+          catch { throw new Error('Invalid advanced JSON. Use /ppp-respond without arguments for the action menu.'); }
+        } else {
+          const candidates = bindings.filter(b => {
+            if (b.sessionId !== sessionId) return false;
+            try { humanState(b, sessionId); return true; } catch { return false; }
+          });
+          if (argument) {
+            const matches = candidates.filter(b => b.runId === argument || path.basename(b.root) === argument);
+            if (matches.length === 1) binding = matches[0];
+            else {
+              ctx.ui.notify('Questions are not authorizations: ask Chat A in ordinary chat, or inspect /ppp-status. Use /ppp-respond without arguments to choose a run and action; no ID or JSON is needed.', 'info');
+              return;
+            }
+          } else if (candidates.length === 1) binding = candidates[0];
+          else if (candidates.length > 1) {
+            const names = candidates.map(b => path.basename(b.root));
+            const labels = candidates.map((b, i) => {
+              const info = inspectRun(names[i], b.root);
+              const name = names.indexOf(names[i]) === names.lastIndexOf(names[i]) ? names[i] : b.root;
+              return `${name} — ${info.mode ?? 'run'} · ${info.state}`;
+            });
+            const selected = await ctx.ui.select('Choose the run to respond to', labels);
+            if (!selected) return;
+            binding = candidates[labels.indexOf(selected)];
+          } else throw new Error('No active protocol-2 run is attached to this chat. Inspect /ppp-status; completed runs cannot be restarted by a response.');
+          if (!binding) return;
+          input = await humanDialog(binding, ctx);
+          if (!input) return;
+        }
+        const state = humanState(binding, sessionId);
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['kind', 'message', 'blocker_ids', 'cycles', 'request_id'].includes(k))) throw new Error('Unexpected human response fields.');
+        if (!['resolution', 'grant', 'cancel', 'halt', 'signal'].includes(String(input.kind))) throw new Error('Unknown response kind.');
+        if (typeof input.message !== 'string' || !input.message.trim() || input.message.length > 4000 || hasSecret(input.message)) throw new Error('Use a short non-secret description; configure credentials securely outside chat.');
+        if (input.kind === 'resolution' && (!Array.isArray(input.blocker_ids) || input.blocker_ids.length === 0 || !input.blocker_ids.every(b => typeof b === 'string' && Object.hasOwn(state.blockers, b)))) throw new Error('Address existing blocker IDs explicitly.');
+        if (input.kind === 'grant' && (!Number.isSafeInteger(input.cycles) || Number(input.cycles) <= 0 || typeof input.request_id !== 'string' || !state.requests[input.request_id]?.main_extension || state.requests[input.request_id].main_grant_count !== state.grants.length || state.grants.some(g => g.request_id === input.request_id))) throw new Error('This budget request is no longer current. Open /ppp-respond again; no budget was added.');
+        const inbox = path.join(binding.root, 'human-inbox');
+        if (fs.existsSync(inbox) && (fs.lstatSync(inbox).isSymbolicLink() || !isPrivate(fs.statSync(inbox)))) throw new Error('Human inbox must be a private non-symlink directory.');
+        if (input.kind === 'grant' && fs.existsSync(inbox) && fs.readdirSync(inbox).filter(name => name.endsWith('.json')).some(name => {
+          const prior = read<{ kind?: string; request_id?: string }>(path.join(inbox, name));
+          return prior.kind === 'grant' && prior.request_id === input.request_id;
+        })) throw new Error('Authorization for this main-budget request is already recorded; no duplicate grant.');
+        const actionLabels: Record<string, string> = { resolution: 'Answer an addressed request', grant: 'Authorize additional main cycles', signal: 'Send a non-authorizing message', cancel: 'Cancel this run permanently', halt: 'Halt this run permanently' };
+        const config = read<Config>(path.join(binding.root, 'config.json'));
+        const goalGrant = config.mode === 'goal';
+        const goalTokens = config.goal_tokens === undefined || config.goal_tokens === null ? undefined : Number(config.goal_tokens);
+        const grantAmount = goalGrant
+          ? goalGrantText(config, Number(input.cycles), 'additional ')
+          : `${input.cycles} additional Worker iterations`;
+        if (input.kind === 'grant' && goalGrant && !grantAmount) throw new Error('Invalid Goal budget configuration; no budget was added.');
+        const windows = state.grants.filter(g => g.scope === 'main' && g.authority !== 'initial-contract').map(g => g.goal_token_windows ?? g.max_cycles);
+        const total = goalGrant && goalTokens !== undefined && state.grants.some(g => g.scope === 'main' && g.authority === 'initial-contract') && windows.every(w => Number.isSafeInteger(w) && Number(w) >= 0)
+          ? goalTokens * (1 + windows.reduce<number>((sum, w) => sum + Number(w), 0) + Number(input.cycles)) : undefined;
+        const totalText = Number.isSafeInteger(total) ? ` Total Goal limit: ${Number(total).toLocaleString('en-US')} tokens.` : '';
+        const summary = input.kind === 'grant' ? `Run: ${path.basename(binding.root)}\nContinue work with ${grantAmount}.${totalText} No automatic renewal.\n${goalGrant && goalTokens !== undefined ? 'Includes repeated context and cache reads; the last response may exceed the limit. This is not a dollar cap.\n' : ''}Independent checks have a separate budget.` : [`Run: ${path.basename(binding.root)} (${binding.runId})`, `Action: ${actionLabels[String(input.kind)]}`,
+          ...(Array.isArray(input.blocker_ids) ? [`Addresses: ${input.blocker_ids.join(', ')}`] : []),
+          ...(input.kind === 'grant' ? [`Explicitly authorize ${input.cycles} additional main cycles for ${input.request_id}.`] : []),
+          `Message: ${input.message}`, 'Responses are independently checked; this is not acceptance. Cancel/halt stops the run, not a pause. No secrets.'].join('\n');
+        if (!await ctx.ui.confirm(input.kind === 'grant' ? 'Continue work?' : 'Record this human instruction?', summary)) return;
+        if (ctx.sessionManager.getSessionId() !== sessionId) throw new Error('Session changed; instruction was not recorded.');
+        const current = humanState(binding, sessionId);
+        if (input.kind === 'grant' && (typeof input.request_id !== 'string' || !current.requests[input.request_id]?.main_extension || current.requests[input.request_id].main_grant_count !== current.grants.length || (!match && (current.wait?.source !== 'human-response' || current.wait.reference !== input.request_id)) || current.grants.some(g => g.request_id === input.request_id))) throw new Error('The budget request changed while you were deciding. Open /ppp-respond again; no budget was added.');
+        const id = randomUUID();
+        fs.mkdirSync(inbox, { recursive: true, mode: 0o700 });
+        if (fs.lstatSync(inbox).isSymbolicLink() || !isPrivate(fs.statSync(inbox))) throw new Error('Human inbox must be a private non-symlink directory.');
+        atomic(path.join(inbox, `${id}.json`), { protocol_version: 2, schema_version: 1, run_id: binding.runId, session_id: binding.sessionId, id, source: 'pi-command', ...input });
+        pi.appendEntry('pi-ppp-human', { run_id: binding.runId, response_id: id, kind: input.kind });
+        const script = process.env.PI_PING_PONG_BRIDGE || path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py');
+        const fd = fs.openSync(path.join(binding.root, 'launcher.log'), 'a', 0o600);
+        try {
+          const child = spawn('python3', ['-B', script, 'wake', '--config', path.join(binding.root, 'config.json')], { cwd: binding.root, detached: true, stdio: ['ignore', fd, fd] });
+          child.once('error', error => ctx.ui.notify(`Response is durable; wake failed: ${String(error)}. Inspect launcher.log before explicit reconciled resume.`, 'error'));
+          child.unref();
+        } finally { fs.closeSync(fd); }
+        ctx.ui.notify(input.kind === 'grant' ? 'Budget recorded. Work can continue after the controller applies it.' : `Recorded ${id}. Controller applies it at a safe boundary; a response alone never resolves a blocker.`, 'info');
+      } catch (error) { ctx.ui.notify(String(error), 'error'); }
+    },
+  });
+
   for (const command of ['pi-ping-pong', 'reviewed-run', 'ppp']) {
     pi.registerCommand(command, {
       description: command === 'ppp' ? 'Short alias for /pi-ping-pong.' : command === 'reviewed-run' ? 'Compatibility alias for /pi-ping-pong.' : 'Open runs, prepare a named run, or launch an existing run/config.',
       handler: startReviewedRun,
     });
   }
-  const showReviewedStatus = async (_args: string, ctx: ExtensionCommandContext) => {
+  async function statusRuns(ctx: ExtensionCommandContext, all: boolean) {
     const byPath = new Map<string, { info: RunInfo; binding?: Binding }>();
-    const project = await resolveProject(ctx);
-    if (project) {
-      try {
-        for (const info of listRuns(project)) if (info.dir) byPath.set(canonicalPath(info.dir), { info });
-      } catch (error) { byPath.set(`project-error:${project.root}`, { info: { name: 'Project runs', state: 'unknown/malformed', details: String(error) } }); }
+    if (all) {
+      const project = await resolveProject(ctx);
+      if (project) {
+        try {
+          for (const info of listRuns(project)) byPath.set(info.dir ? canonicalPath(info.dir) : `invalid:${info.name}`, { info });
+        } catch (error) { byPath.set(`project-error:${project.root}`, { info: { name: 'Project runs', state: 'unknown/malformed', details: String(error) } }); }
+      }
     }
     const sessionId = ctx.sessionManager.getSessionId();
     for (const binding of bindings) {
@@ -692,13 +939,42 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       catch { info = { name: path.basename(binding.root), dir: binding.root, state: 'unknown/malformed' }; }
       byPath.set(canonical, { info, binding });
     }
-    const lines = [...byPath.values()].map(({ info, binding }) => detailedStatus(info, binding));
-    if (!lines.length) lines.push('No named or attached reviewed runs are available in this project/session.');
-    ctx.ui.notify(lines.join('\n\n'), 'info');
+    return [...byPath.values()];
+  }
+  const showReviewedStatus = async (args: string, ctx: ExtensionCommandContext) => {
+    const flags = args.trim() ? args.trim().split(/\s+/) : [];
+    if (flags.some(flag => !['--all', '--details'].includes(flag))) {
+      ctx.ui.notify('Use /ppp-status for this chat, --all for project runs, or --details for explicit technical output.', 'info');
+      return;
+    }
+    let all = flags.includes('--all');
+    while (true) {
+      const runs = await statusRuns(ctx, all);
+      if (flags.includes('--details') || !ctx.hasUI || ctx.mode !== 'tui') {
+        const render = flags.includes('--details') ? detailedStatus : compactStatus;
+        ctx.ui.notify(runs.map(({ info, binding }) => render(info, binding)).join('\n\n') || 'No runs attached to this chat. Use /ppp-status --all to inspect project runs.', 'info');
+        return;
+      }
+      const labels = runs.map(({ info, binding }, index) => {
+        const view = statusView(info, binding);
+        return `${index + 1}. ${info.name} — ${view.label} · cycles ${view.cycle}`;
+      });
+      const switchScope = all ? 'Back to runs in this chat' : 'All runs in this project…';
+      const title = all ? 'All project and attached runs (read-only)' : runs.length ? 'Runs in this chat, including completed (read-only)' : 'No runs attached to this chat (read-only)';
+      const selected = await ctx.ui.select(title, [...labels, switchScope]);
+      if (!selected) return;
+      if (selected === switchScope) { all = !all; continue; }
+      const row = runs[labels.indexOf(selected)];
+      if (!row) return;
+      ctx.ui.notify(compactStatus(row.info, row.binding), 'info');
+      const action = await ctx.ui.select(`Details: ${row.info.name}`, ['Technical details', 'Done']);
+      if (action === 'Technical details') ctx.ui.notify(detailedStatus(row.info, row.binding), 'info');
+      return;
+    }
   };
   for (const command of ['pi-ping-pong-status', 'reviewed-status', 'ppp-status']) {
     pi.registerCommand(command, {
-      description: command === 'ppp-status' ? 'Short alias for /pi-ping-pong-status.' : command === 'reviewed-status' ? 'Compatibility alias for /pi-ping-pong-status.' : 'List local named and attached reviewed-run status; no model calls.',
+      description: command === 'ppp-status' ? 'Short alias for /pi-ping-pong-status.' : command === 'reviewed-status' ? 'Compatibility alias for /pi-ping-pong-status.' : 'Browse runs in this chat; project runs and technical details are optional. Read-only; no model calls.',
       handler: showReviewedStatus,
     });
   }

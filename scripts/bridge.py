@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Bounded Pi RPC transport + Codex queue checkpoints. Python stdlib only."""
 import argparse
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import queue
 import re
+import select
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,23 +17,36 @@ import time
 import uuid
 
 
-REPORT_GUIDANCE = '''Write a concise, self-contained callback report using these headings:
-Run summary; Steps; Verification and errors; Escalation; Completion; Next action.
-State what happened this checkpoint and the overall run state. Include completed
-steps, the fresh evaluator result, review findings/errors and whether anything
-was corrected or rerun. Say "None" for errors or escalation when none occurred;
-do not omit those sections. Distinguish verified completion from intermediate
-progress, stopped work, and unknown outcomes. Cite the run directory and the
-most relevant report/evidence paths. Do not claim checks or actions without
-recorded evidence.
-If user input is genuinely required, put the precise missing decision/input and
-why it blocks progress under Escalation, then give the exact requested action
-under Next action. If there are multiple valid choices, list at most three,
-briefly state each option's main benefit and cost/risk, and recommend one with
-reason. Separate actual approval/access requirements from ordinary preferences.
-If no user action is needed, say so explicitly and state the automatic next step
-or that the run is finished. Do not end by asking a vague question such as
-"suggest the actions" or asking the user to confirm routine work.'''
+REPORT_GUIDANCE = '''Every report delivered to the launching chat must be self-contained, readable without
+opening files, and use this order:
+1. A prominent first line: STATUS — <current run state>, with lifecycle and acceptance
+   kept distinct (never infer acceptance from exit/completion alone).
+2. TL;DR — the essential result in one or two sentences.
+3. Summary — what was done and what it means to the user's task.
+4. Report — use these subsections: Steps; Verification and errors; Escalation;
+   Completion. State the ordinary test results, independent review findings,
+   errors/corrections, and verified versus outstanding criteria. Say "None" for
+   errors or escalation when none occurred; do not omit these subsections.
+5. Suggested action — give an exact action only when needed. Otherwise explicitly
+   say no user action is needed and name the automatic next step or that the run
+   is finished. Never ask for routine confirmation or vague suggestions.
+6. Full run status — include run ID and mode; current phase/execution/lifecycle;
+   cycle and remaining authorized budget; latest checkpoint/review; every criterion
+   and action state; open blockers, human receipts/resolutions, grants and external
+   operation outcomes; worker/reviewer roles and models when known; errors and
+   unavailable/unknown data (including usage or process cleanup). Do not omit
+   fields just because they are unknown; label them unknown/not observed.
+
+Keep the summary ahead of paths and jargon. Include only the most relevant evidence
+paths, with a short explanation of what each proves; paths supplement, never replace,
+the account of what happened. Do not claim checks or actions without recorded
+evidence. Distinguish verified completion from intermediate progress, waiting,
+stopped work, and unknown outcomes. If user input is genuinely required, state the
+precise missing decision/input and why it blocks progress under Escalation, then
+give the exact requested action under Suggested action. If there are multiple valid
+choices, list at most three, briefly state each option's main benefit and cost/risk,
+and recommend one with reason. Separate actual approval/access requirements from
+ordinary preferences. Do not end by asking a vague question or asking the user to confirm routine work.'''
 
 
 def read(path):
@@ -51,6 +65,30 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def goal_snapshot(entries):
+    states = [(index, entry.get('data', {}).get('goal')) for index, entry in enumerate(entries)
+              if entry.get('type') == 'custom' and entry.get('customType') == 'goal-state']
+    if not states:
+        return -1, {}
+    index, goal = states[-1]
+    # Native goal_complete persists complete, then clears it before returning its result.
+    if len(states) > 1 and entries[index].get('data', {}).get('goal', {}) is None:
+        completed_index, completed = states[-2]
+        if isinstance(completed, dict) and completed.get('id') and completed.get('status') == 'complete' and type(completed.get('tokensUsed')) is int and completed['tokensUsed'] >= 0:
+            tail = [entry.get('message', {}) for entry in entries[completed_index + 1:] if entry.get('type') == 'message']
+            # Assistant turns after completion are outside native tokensUsed: meter them exactly or leave usage unknown.
+            extra = [(message.get('usage') or {}).get('totalTokens') if isinstance(message.get('usage'), dict) else None for message in tail if message.get('role') == 'assistant']
+            if all(type(tokens) is int and tokens >= 0 for tokens in extra) and any(
+                entry.get('type') == 'message' and entry.get('message', {}).get('role') == 'toolResult'
+                and entry['message'].get('toolName') == 'goal_complete' and entry['message'].get('isError') is False
+                and entry['message'].get('details', {}).get('goal_id') == completed['id']
+                and any(part.get('type') == 'text' and part.get('text', '').startswith('Goal complete:') for part in entry['message'].get('content', []))
+                for entry in entries[index + 1:]
+            ):
+                return completed_index, {**completed, 'postCompletionTokens': sum(extra)}
+    return index, goal or {}
+
+
 def inside(root, relative):
     p = (root / relative).resolve()
     if not p.is_relative_to(root.resolve()):
@@ -60,11 +98,32 @@ def inside(root, relative):
     return p
 
 
+def evidence_path(c, name):
+    work = Path(c['root']) / 'work'
+    path = (work / name).resolve()
+    target = c.get('execution_contract', {}).get('target') if c.get('protocol_version', 1) == 2 else None
+    if path.is_relative_to(work.resolve()):
+        return inside(work, name)
+    if isinstance(target, str) and Path(target).is_absolute() and path.is_relative_to(Path(target).resolve()):
+        if any(part.startswith('.env') or part.lower() in {'auth.json', 'credentials.json'} for part in path.parts):
+            raise ValueError('Secret-bearing paths must not be checkpoint evidence')
+        return path
+    raise ValueError(f'Evidence escapes run work directory and authorized target: {name!r} resolves to {path}; work base: {work.resolve()}; target: {target!r}')
+
+
 def load_config(path):
     c = read(path)
-    for key in ('run_id', 'mode', 'worker_model', 'review_model', 'task', 'eval_argv', 'max_cycles', 'wall_seconds', 'review_seconds', 'cycle_seconds'):
+    # Goal is bounded by wall/review seconds and goal_max_launches (+ optional goal_tokens); cycle fields stay optional.
+    cycle_limits = () if c.get('mode') == 'goal' else ('max_cycles', 'cycle_seconds')
+    for key in ('run_id', 'mode', 'worker_model', 'review_model', 'task', 'wall_seconds', 'review_seconds', *cycle_limits):
         if key not in c:
             raise ValueError(f'Missing config: {key}')
+    for key in ('worker_extensions', 'reviewer_extensions'):
+        if key in c:
+            paths = c[key]
+            if not isinstance(paths, list) or any(not isinstance(p, str) or not p.strip() or '\x00' in p for p in paths):
+                raise ValueError(f'{key} must be a list of non-empty paths')
+            c[key] = [str((Path(path).resolve().parent / p).resolve()) for p in paths]
     limit = c.setdefault('max_evidence_files', 20)
     if type(limit) is not int or limit < 1:
         raise ValueError('max_evidence_files must be a positive integer')
@@ -77,15 +136,38 @@ def load_config(path):
             raise ValueError('Pi transport must be bound by /reviewed-run to its launching session')
     else:
         raise ValueError('Unknown review_transport')
+    execution = c.get('review_execution', 'chat')
+    if execution not in {'chat', 'headless'}:
+        raise ValueError('Unknown review_execution')
+    if execution == 'headless':
+        if c.get('protocol_version') != 2 or transport != 'pi':
+            raise ValueError('Headless review requires protocol 2 and Pi UI transport')
+        if not isinstance(c.get('review_provider'), str) or not c['review_provider'].strip():
+            raise ValueError('Headless review needs explicit review_provider')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,100}', c['run_id']):
         raise ValueError('Invalid run_id')
-    if c['mode'] not in {'goal', 'ralph'}:
+    if c['mode'] not in {'goal', 'ralph', 'ping-pong'}:
         raise ValueError('Invalid mode')
     for k in ('max_cycles', 'wall_seconds', 'review_seconds', 'cycle_seconds'):
-        if type(c[k]) is not int or c[k] < 1:
+        if k in c and (type(c[k]) is not int or c[k] < 1):
             raise ValueError(f'Invalid limit: {k}')
-    if not isinstance(c['eval_argv'], list) or not c['eval_argv'] or not all(isinstance(x, str) for x in c['eval_argv']):
-        raise ValueError('eval_argv must be an argv array, never shell text')
+    version = c.get('protocol_version')
+    if type(version) is not int or version != 2:
+        raise ValueError('Evaluator-era protocol 1 is no longer supported; prepare a new protocol 2 run, preserving old artifacts')
+    if 'eval_argv' in c:
+        raise ValueError('eval_argv is obsolete; prepare TASK/config without a separate evaluator')
+    if version == 2:
+        from action_protocol import validate_contract
+        # goal_tokens is an optional cumulative cap; without it native Goal runs uncapped by tokens.
+        if 'goal_tokens' in c and (type(c['goal_tokens']) is not int or c['goal_tokens'] < 1):
+            raise ValueError('Invalid limit: goal_tokens')
+        c.setdefault('goal_max_launches', 10)
+        if type(c['goal_max_launches']) is not int or c['goal_max_launches'] < 1:
+            raise ValueError('Invalid limit: goal_max_launches')
+        c.setdefault('checkpoint_repair_attempts', 3)
+        if type(c['checkpoint_repair_attempts']) is not int or c['checkpoint_repair_attempts'] < 0:
+            raise ValueError('Invalid limit: checkpoint_repair_attempts')
+        validate_contract(c)
     c['root'] = str(Path(path).resolve().parent)
     if not Path(c['task']).is_absolute():
         c['task'] = str(Path(c['root']) / c['task'])
@@ -97,7 +179,7 @@ def validate_checkpoint(c, cycle):
     p = root / 'work' / 'checkpoint.json'
     cp = read(p)
     if cp.get('run_id') != c['run_id'] or cp.get('cycle') != cycle:
-        raise ValueError('Stale/wrong checkpoint identity')
+        raise ValueError(f"Stale/wrong checkpoint identity: run_id {cp.get('run_id')!r} (expected {c['run_id']!r}), cycle {cp.get('cycle')!r} (expected {cycle!r})")
     if cp.get('status') not in {'progress', 'ready', 'needs_human'}:
         raise ValueError('Checkpoint requires progress/ready/needs_human status')
     if not isinstance(cp.get('summary'), str) or not 0 < len(cp['summary']) <= 2000:
@@ -110,9 +192,9 @@ def validate_checkpoint(c, cycle):
         raise ValueError('Results need evidence')
     hashes = {}
     for name in evidence:
-        path = inside(root / 'work', name)
+        path = evidence_path(c, name)
         if not path.is_file():
-            raise ValueError(f'Missing evidence: {name}')
+            raise ValueError(f'Missing evidence: {name!r} resolves to {path}; work base: {(root / "work").resolve()}')
         hashes[name] = digest(path)
     if cp['status'] == 'needs_human' and cp.get('reason_code') not in {'missing_secret', 'missing_access', 'approval_required', 'user_choice', 'external_blocker'}:
         raise ValueError('Human checkpoint needs a concrete reason_code')
@@ -121,25 +203,7 @@ def validate_checkpoint(c, cycle):
 
 def unchanged(c, snap):
     root = Path(c['root']) / 'work'
-    return digest(root / 'checkpoint.json') == snap['checkpoint_sha256'] and all(digest(inside(root, n)) == h for n, h in snap['evidence_sha256'].items())
-
-
-def validate_review(c, request, review):
-    for key in ('run_id', 'cycle', 'checkpoint_sha256'):
-        if review.get(key) != request.get(key):
-            raise ValueError(f'Stale/wrong review {key}')
-    decision = review.get('decision')
-    if decision not in {'continue', 'revise', 'complete', 'wait_human', 'stop'}:
-        raise ValueError('Invalid review decision')
-    if not isinstance(review.get('feedback'), str) or not review['feedback'].strip():
-        raise ValueError('Review needs explicit feedback')
-    if decision in {'continue', 'complete'} and request['eval']['exit_code'] != 0:
-        raise ValueError('Cannot accept failed independent eval')
-    if decision == 'complete' and request['checkpoint']['status'] != 'ready':
-        raise ValueError('Cannot complete an intermediate checkpoint')
-    if request['checkpoint']['status'] == 'needs_human' and decision in {'continue', 'revise', 'complete'} and not review.get('human_resolved'):
-        raise ValueError('Human blocker needs actual human resolution')
-    return decision
+    return digest(root / 'checkpoint.json') == snap['checkpoint_sha256'] and all(digest(evidence_path(c, n)) == h for n, h in snap['evidence_sha256'].items())
 
 
 class Bridge:
@@ -175,7 +239,14 @@ class Bridge:
         self.proc.stdin.flush()
         return ident
 
+    def process_returncode(self):
+        return self.proc.poll()
+
+    def check_control(self):
+        pass
+
     def next(self, seconds=0.25):
+        self.check_control()
         if self.remaining() <= 0:
             raise TimeoutError('Overall wall-clock limit reached')
         try:
@@ -184,8 +255,9 @@ class Bridge:
             try:
                 record = self.records.get(timeout=seconds)
             except queue.Empty:
-                if self.proc.poll() is not None:
-                    raise RuntimeError(f'Pi exited unexpectedly: {self.proc.returncode}')
+                returncode = self.process_returncode()
+                if returncode is not None:
+                    raise RuntimeError(f'Pi exited unexpectedly: {returncode}')
                 return {}
         if record.get('type') == 'response' and record.get('id') in self.outstanding:
             self.outstanding.discard(record['id'])
@@ -196,20 +268,68 @@ class Bridge:
             self.event('pi.' + record['type'], aborted=record.get('aborted'))
         return record
 
+    def prepare_browser_runtime(self):
+        if hasattr(self, 'browser_runtime'):
+            return
+        self.browser_runtime = {'status': 'not_requested'}
+        try:
+            task = Path(self.c['task']).read_text()
+            if not re.search(r'playwright|browser|браузер', task, re.I):
+                return
+            node = shutil.which('node')
+            if not node:
+                raise RuntimeError('Node executable unavailable')
+            roots = [str(Path(self.c['task']).parent), str(self.root / 'work')]
+            target = self.c.get('execution_contract', {}).get('target')
+            if isinstance(target, str) and Path(target).is_absolute():
+                roots.insert(0, str(Path(target) if Path(target).is_dir() else Path(target).parent))
+            script = '''const fs = require('node:fs');
+const {createRequire} = require('node:module');
+const path = require('node:path');
+const roots = JSON.parse(process.argv[1]);
+const configured = process.env.PPP_PLAYWRIGHT_MODULE;
+for (const root of roots) {
+  const req = createRequire(path.join(root, 'package.json'));
+  for (const name of configured ? [configured] : ['playwright', '@playwright/test', 'playwright-core']) {
+    try {
+      const module = req.resolve(name);
+      const api = req(module);
+      if (typeof api.chromium?.launch !== 'function') continue;
+      console.log(JSON.stringify({status:'available', node:process.execPath, module:fs.realpathSync(module)}));
+      process.exit(0);
+    } catch {}
+  }
+}
+process.exit(1);'''
+            result = subprocess.run([node, '-e', script, json.dumps(roots)], capture_output=True, text=True, timeout=5)
+            if result.returncode:
+                raise RuntimeError('No loadable configured/project-installed Playwright module')
+            runtime = json.loads(result.stdout)
+            if not isinstance(runtime, dict) or runtime.get('status') != 'available' or not all(isinstance(runtime.get(key), str) and Path(runtime[key]).is_absolute() for key in ('node', 'module')):
+                raise RuntimeError('Invalid browser module-resolution result')
+            self.browser_runtime = runtime
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            self.browser_runtime = {'status': 'unavailable', 'error': str(error)}
+
+    def browser_env(self):
+        runtime = getattr(self, 'browser_runtime', {})
+        return {'PPP_PLAYWRIGHT_MODULE': runtime['module']} if runtime.get('status') == 'available' else {}
+
     def spawn(self):
         home = Path.home()
-        extension = self.c.get('extension') or str(home / '.pi/agent/npm/node_modules' / ('@narumitw/pi-goal/dist/index.ts' if self.c['mode'] == 'goal' else '@lnilluv/pi-ralph-loop/src/index.ts'))
-        argv = ['pi', '--mode', 'rpc', '--no-extensions', '-e', extension, '--no-mcp', '--provider', self.c.get('worker_provider', 'openai-codex'), '--model', self.c['worker_model'], '--thinking', self.c.get('thinking', 'low'), '--session-dir', str(self.root / 'sessions'), '--session-id', self.c['run_id']]
+        argv = ['pi', '--mode', 'rpc', '--no-extensions']
+        if self.c['mode'] != 'ping-pong':
+            extension = self.c.get('extension') or str(home / '.pi/agent/npm/node_modules' / ('@narumitw/pi-goal/dist/index.ts' if self.c['mode'] == 'goal' else '@lnilluv/pi-ralph-loop/src/index.ts'))
+            argv += ['-e', extension]
+        for extension in self.c.get('worker_extensions', []):
+            argv += ['-e', extension]
+        argv += ['--no-mcp', '--provider', self.c.get('worker_provider', 'openai-codex'), '--model', self.c['worker_model'], '--thinking', self.c.get('thinking', 'low'), '--session-dir', str(self.root / 'sessions'), '--session-id', (self.c.get('worker_session_id', self.c['run_id']) if self.c.get('protocol_version') == 2 else self.c['run_id'])]
         self.stderr = (self.root / 'pi-stderr.log').open('ab')
-        self.proc = subprocess.Popen(argv, cwd=self.root / 'work', stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, start_new_session=True)
+        self.proc = subprocess.Popen(argv, cwd=getattr(self, 'rpc_cwd', getattr(self, 'worker_cwd', self.root / 'work')), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, start_new_session=True, env={**os.environ, **self.browser_env(), **getattr(self, 'rpc_env', {})}, umask=0o077, **getattr(self, 'spawn_options', {}))
         self.state['pid'] = self.proc.pid
-        def reader():
-            for line in self.proc.stdout:
-                try:
-                    self.records.put(json.loads(line))
-                except (ValueError, UnicodeError):
-                    self.event('protocol.non_json_line')
-        threading.Thread(target=reader, daemon=True).start()
+        self.reader_stop = threading.Event()
+        self.reader_thread = threading.Thread(target=self.read_stdout, args=(self.proc.stdout, self.records, self.reader_stop), daemon=True)
+        self.reader_thread.start()
         req = self.send('get_state')
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
@@ -220,44 +340,109 @@ class Bridge:
                 return
         raise TimeoutError('Pi RPC startup timeout')
 
+    def read_stdout(self, stream, records, stopped):
+        pending = bytearray()
+        def record(line):
+            try:
+                records.put(json.loads(line))
+            except (ValueError, UnicodeError):
+                self.event('protocol.non_json_line')
+        try:
+            os.set_blocking(stream.fileno(), False)
+            while not stopped.is_set():
+                if not select.select([stream], [], [], 0.1)[0]:
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    if pending:
+                        record(pending)
+                    break
+                lines = chunk.split(b'\n')
+                pending.extend(lines[0])
+                if len(lines) > 1:
+                    record(pending)
+                    for line in lines[1:-1]:
+                        record(line)
+                    pending = bytearray(lines[-1])
+        except (OSError, ValueError):
+            self.event('protocol.stdout_read_error')
+        finally:
+            stream.close()
+
+    def close_stdout(self):
+        # Reap/stop the owned group first; a detached pipe holder must not stall cleanup.
+        if hasattr(self, 'reader_thread'):
+            self.reader_stop.set()
+            self.reader_thread.join()
+            del self.reader_thread
+        elif self.proc is not None and self.proc.stdout:
+            self.proc.stdout.close()
+
     def contract(self):
         contract = f'''# Reviewed Pi work contract
 Run directory: {self.root}
 Checkpoint/evidence directory: {self.root / 'work'}
 Task specification: {self.c['task']}
-Read the task and cycle-context.json. Perform ONE logical deliverable or requested correction, not one tool call.
+Read the task and cycle-context.json. {'Pursue the full authorized objective through native Goal continuation.' if self.c['mode'] == 'goal' else 'Perform ONE logical deliverable or requested correction, not one tool call.'}
+If cycle-context.feedback begins with 'Core rejected Worker checkpoint:', fix only checkpoint schema or exact evidence references from existing artifacts. Never change run/cycle identity or repeat task work or external actions.
 work/ is a report and checkpoint directory, not a source checkout. Missing source files there do not imply missing access.
 The task may permit edits to explicitly authorized source paths outside work/, including project scripts. Use those source paths directly; keep reports, logs and checkpoint evidence inside work/.
 Without explicit task authorization, write only inside work/; cwd or Git ancestry does not grant write permission. Do not create a checkout, worktree or copy of the project unless the task authorizes it.
 Create outputs yourself. Missing files mean bootstrap work, never a reason to stop early.
-Do not modify this run's config, task specification, reviewer files, evaluator, protocol state or preserved baseline files. Task-authorized project source edits do not grant permission to alter the active run machinery. Do not call codex queue yourself. Do not launch other Pi/Goal/Ralph processes.
+Do not modify this run's config, task specification, reviewer files, protocol state or preserved baseline files. Task-authorized project source edits do not grant permission to alter the active run machinery. Do not call codex queue yourself. Do not launch other Pi/Goal/Ralph processes.
 At a logical checkpoint write work/checkpoint.json with run_id, cycle (from cycle-context.json), status (progress/ready/needs_human), summary (<=2000 characters), evidence (relative work file paths), next_step and reason_code.
-Keep checkpoint evidence compact: report, manifest/measurement index, relevant code and final changed outputs only; do not list every intermediate tile/log. Link raw artifacts and their hashes from the manifest/index, and have the task evaluator verify them. evidence list limit: {self.c.get('max_evidence_files', 20)} files.
+Keep checkpoint evidence compact: report, manifest/measurement index, relevant code and final changed outputs only; do not list every intermediate tile/log. Link raw artifacts and their hashes from the manifest/index, and retain ordinary test results. evidence list limit: {self.c.get('max_evidence_files', 20)} files.
 status=ready means all task deliverables ready for independent FINAL review, not just one step.
 For missing env secret/access, user approval or user choice, status=needs_human with reason_code missing_secret/missing_access/approval_required/user_choice/external_blocker; identify required action WITHOUT printing any secret. Do not ask for permission for ordinary in-scope retries.
 Run the task's targeted checks before checkpoint. Do not weaken checks or mark incomplete work complete.
+Browser runtime resolution (module load only, not browser/login verification): {json.dumps(getattr(self, 'browser_runtime', {}))}
+When available, Node can require(process.env.PPP_PLAYWRIGHT_MODULE); use the same route for tests. Reuse it rather than searching the host. If unavailable, continue independent work and use other configured browser guidance/routes; do not infer missing access from one module-resolution failure.
 No authority beyond the task. Simulated people's names must contain Test.
 '''
         if self.c['mode'] == 'goal':
-            contract += '''After EVERY checkpoint call goal_wait with the exact active goal_id and reason 'Codex review checkpoint', WITHOUT resume_after_ms. The external bridge arranges the wake source. Do not call goal_complete before a reviewer decision=complete. Wait without polling bash or paid model turns. A review reply will arrive through this same RPC session.
-When final review is accepted, call goal_complete with evidence; do not change artifacts after final approval.
+            contract += '''Pursue the full authorized objective through native Goal continuation. Save the result checkpoint before native goal_complete, or a real limitation. Checkpoints do not request review or interrupt work. Native completion is a Worker claim, not independent acceptance. Use goal_wait only for a real arranged external wake, never for routine review.
 '''
         else:
             contract += '''This is one bounded Ralph iteration. Save checkpoint.json and end. The external bridge reviews it BEFORE starting the next iteration. Do not start the next link/step yourself.
 '''
         (self.root / 'CONTRACT.md').write_text(contract)
 
-    def goal_cycle(self, feedback=None, final=False):
-        if self.state['cycle'] == 1 and feedback is None:
-            message = f'/goal Read {self.root / "CONTRACT.md"} and the referenced task. Execute the first logical deliverable, save checkpoint, then goal_wait for the arranged external Codex reviewer. No goal_complete before final acceptance.'
+    def goal_cycle(self, feedback=None, fresh_session=False, replace_budget_limited=False, on_start=None):
+        self.goal_budget_limited = False
+        self.goal_boundary = None
+        start = fresh_session or self.state['cycle'] == 1 and feedback is None and not getattr(self, 'goal_started', False)
+        # Existing session already holds CONTRACT/TASK; only cycle-context.json carries changed budget/feedback.
+        reads = f'Read {self.root / "CONTRACT.md"}, the task and {self.root / "work/cycle-context.json"}.' if start else f'Read {self.root / "work/cycle-context.json"}. CONTRACT.md and the task were already delivered in this session; reread them only if they are no longer in your context.'
+        instruction = f'{reads} Pursue the full authorized objective autonomously through native Goal continuation, including ordinary tests. Save the result checkpoint before native completion or a real limitation. Native completion is not acceptance. Core/Reviewer feedback: {feedback or "Initial authorized work."}'
+        if start:
+            tokens = self.c.get('goal_session_tokens', self.c.get('goal_tokens'))
+            token_option = f'--tokens {tokens} ' if self.c.get('protocol_version') == 2 and tokens is not None else ''
+            message = f'/goal {token_option}{instruction}'
         else:
-            message = ('Final independent review ACCEPTED. Do not modify task artifacts. Call goal_complete for the current goal_id with evidence.' if final else f'Codex review for previous checkpoint: {feedback}. Read cycle-context.json and CONTRACT.md. Execute the next logical deliverable/correction and checkpoint, then goal_wait.')
+            message = instruction
         self.send('prompt', message=message)
-        deadline = time.monotonic() + self.c['cycle_seconds']
+        seconds = self.remaining() if self.c.get('protocol_version') == 2 else self.c['cycle_seconds']
+        deadline = min(time.monotonic() + seconds, getattr(self, 'logical_cycle_deadline', float('inf')))
         self.cycle_deadline = deadline
         outcome = None
+        replacement_confirmed = False
+        announced = False
         while time.monotonic() < deadline:
             e = self.next(min(0.25, max(0.01, deadline - time.monotonic())))
+            if e.get('type') == 'extension_ui_request' and e.get('method') in {'confirm', 'select', 'input', 'editor'}:
+                if not (replace_budget_limited and fresh_session and not replacement_confirmed and e.get('method') == 'confirm' and e.get('title') == 'Replace goal?' and isinstance(e.get('id'), str)):
+                    raise RuntimeError('Unexpected Pi Goal dialog; no confirmation was given')
+                self.proc.stdin.write((json.dumps({'type': 'extension_ui_response', 'id': e['id'], 'confirmed': True}) + '\n').encode())
+                self.proc.stdin.flush()
+                replacement_confirmed = True
+                self.event('pi.goal_budget_replacement_confirmed')
+            if e.get('type') == 'agent_start' and not announced:
+                announced = True
+                if on_start:
+                    on_start()
             if e.get('type') == 'tool_execution_end':
                 name = e.get('toolName')
                 if name in {'goal_wait', 'goal_complete', 'goal_blocked'}:
@@ -273,32 +458,35 @@ When final review is accepted, call goal_complete with evidence; do not change a
                 self.event('pi.goal_tool_boundary_superseded', tool=outcome)
                 outcome = None
             if e.get('type') == 'agent_settled':
+                native = self.goal_state()
+                status = native.get('status')
+                if status == 'budget_limited':
+                    self.goal_budget_limited = True
+                    self.event('pi.goal_budget_limited', goal_id=native.get('id'), tokens_used=native.get('tokens_used'))
+                if status in {'complete', 'blocked', 'paused', 'usage_limited', 'budget_limited'} or native.get('safetyPauseCause') or native.get('waiting') or outcome:
+                    self.goal_boundary = native
+                    self.event('pi.goal_result', goal_id=native.get('id'), status=status, waiting=native.get('waiting'))
+                    return
                 if e.get('aborted'):
                     raise RuntimeError('Pi agent run aborted before Goal boundary')
-                if outcome == 'goal_complete':
-                    if not final:
-                        raise RuntimeError('Pi completed before independent review')
-                    return
-                if outcome == 'goal_wait' and not final:
-                    return
-                native = self.goal_state()
-                if native.get('status') != 'active' or native.get('safetyPauseCause') or native.get('waiting'):
-                    raise RuntimeError(f'Goal stopped or entered an unexpected wait: {native}')
-                if outcome == 'goal_blocked':
-                    raise RuntimeError(f'Goal reported blocked before review: {native}')
-                # A settled agent run is only one turn; Goal may continue automatically.
+                if status != 'active':
+                    raise RuntimeError(f'Goal state unavailable at settlement: {native}')
+                # A settled agent run is only one turn; native Goal continues itself.
                 outcome = None
-        raise TimeoutError('Pi logical cycle timeout without an accepted Goal boundary')
+        raise TimeoutError('Pi logical cycle timeout without a native Goal result')
 
-    def goal_state(self):
+    def goal_state(self, deadline=None):
+        self.check_control()
         ident = self.send('get_entries')
-        deadline = min(time.monotonic() + 10, time.monotonic() + max(0, self.remaining()), getattr(self, 'cycle_deadline', float('inf')))
+        deadline = min(time.monotonic() + max(0, self.remaining()), deadline if deadline is not None else getattr(self, 'cycle_deadline', float('inf')))
         while time.monotonic() < deadline:
+            self.check_control()
             try:
                 e = self.records.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
             except queue.Empty:
-                if self.proc and self.proc.poll() is not None:
-                    raise RuntimeError(f'Pi exited during Goal state query: {self.proc.returncode}')
+                returncode = self.process_returncode() if self.proc else None
+                if returncode is not None:
+                    raise RuntimeError(f'Pi exited during Goal state query: {returncode}')
                 continue
             if e.get('id') != ident or e.get('type') != 'response':
                 self.deferred.put(e)
@@ -306,44 +494,58 @@ When final review is accepted, call goal_complete with evidence; do not change a
             self.outstanding.discard(ident)
             if not e.get('success'):
                 raise RuntimeError(f'Pi RPC get_entries failed: {e.get("error")}')
-            states = [x for x in e.get('data', {}).get('entries', []) if x.get('type') == 'custom' and x.get('customType') == 'goal-state']
-            goal = (states[-1].get('data', {}).get('goal') or {}) if states else {}
-            native = {k: goal.get(k) for k in ('id', 'status', 'waiting', 'safetyPauseCause', 'automaticModelTurns')}
+            _, goal = goal_snapshot(e.get('data', {}).get('entries', []))
+            native = {k: goal.get(k) for k in ('id', 'status', 'waiting', 'safetyPauseCause', 'automaticModelTurns', 'tokensUsed', 'tokenBudget', 'iteration')}
+            native['tokens_used'] = goal['tokensUsed'] + goal['postCompletionTokens'] if 'postCompletionTokens' in goal else goal.get('tokensUsed')
             atomic(self.root / 'native-goal-state.json', native)
             return native
         raise TimeoutError('Pi Goal state query timeout')
 
-    def ralph_cycle(self, feedback=None):
-        n = self.state['cycle']
-        directory = self.root / 'ralph' / f'{n:03}'
-        directory.mkdir(parents=True)
-        text = f'''---
-max_iterations: 1
-timeout: {min(self.c['cycle_seconds'], 3600)}
----
-Read {self.root / 'CONTRACT.md'} and {self.c['task']}. You execute this iteration now; no waiting for another agent.
-Shared outputs: {self.root / 'work'}. Checkpoint cycle={n}.
-Previous reviewer feedback: {feedback or 'First pass: create missing deliverables.'}
-Finish one logical deliverable/correction and save checkpoint.json. Missing outputs mean create them.
-'''
-        (directory / 'RALPH.md').write_text(text)
-        self.send('prompt', message=f'/ralph --path {directory}')
-        deadline = time.monotonic() + self.c['cycle_seconds'] + 30
-        status_file = directory / '.ralph-runner/status.json'
+    def ping_pong_cycle(self, on_start=None):
+        self.send('prompt', message=f'Read {self.root / "CONTRACT.md"}, {self.c["task"]} and {self.root / "work/cycle-context.json"}. Execute the selected action or correction, save the checkpoint and end this iteration.')
+        deadline = min(time.monotonic() + self.c['cycle_seconds'], getattr(self, 'logical_cycle_deadline', float('inf')))
+        started = False
         while time.monotonic() < deadline:
-            self.next()
-            if status_file.exists():
-                state = read(status_file)
-                if state.get('completedAt'):
-                    self.event('ralph.iteration_finished', loop_token=state.get('loopToken'), native_status=state.get('status'))
-                    return
-        raise TimeoutError('Ralph iteration timeout')
+            event = self.next(min(0.25, max(0.01, deadline - time.monotonic())))
+            if event.get('type') == 'agent_start' and not started:
+                started = True
+                if on_start:
+                    on_start()
+            if event.get('type') == 'agent_settled' and started:
+                if event.get('aborted'):
+                    raise RuntimeError('Pi Worker aborted before iteration boundary')
+                return
+        raise TimeoutError('Pi Worker iteration timeout')
 
-    def queue_message(self, message, receipt):
+    def ralph_cycle(self, on_start=None):
+        host = read(self.ralph_guards / 'host.json')
+        if host.get('pid') != self.proc.pid or host.get('cleanup_supported') is not True:
+            raise RuntimeError('Native Ralph parent guard did not initialize; no loop was launched')
+        self.send('prompt', message=f'/ralph --path {self.ralph_argument}')
+        announced = False
+        while self.remaining() > 0:
+            event = self.next(min(0.25, self.remaining()))
+            if event.get('type') == 'extension_ui_request' and event.get('method') in {'confirm', 'select', 'input', 'editor'}:
+                raise RuntimeError('Unexpected Ralph dialog; no confirmation was given')
+            native = self.ralph_state()
+            if native and native.get('currentIteration', 0) > 0 and not announced:
+                announced = True
+                if on_start:
+                    on_start()
+            if native and native.get('completedAt'):
+                self.event('ralph.loop_finished', loop_token=native['loopToken'], native_status=native['status'])
+                return
+        raise TimeoutError('Cumulative Ralph Worker time exhausted')
+
+    def queue_message(self, message, receipt, trigger_turn=None, notice_type=None, report_key=None):
+        persist = atomic
+        if self.c.get('protocol_version') == 2:
+            from action_protocol import durable
+            persist = durable
         marker = receipt.with_suffix('.attempt.json')
         if marker.exists():
             raise RuntimeError('Queue delivery already attempted; inspect receipt instead of duplicating')
-        atomic(marker, {'attempted_at': time.time()})
+        persist(marker, {'attempted_at': time.time()})
         if self.c['review_transport'] == 'pi':
             binding = read(self.root / 'pi-receiver.json')
             if binding.get('session_id') != self.c['pi_session_id'] or binding.get('run_id') != self.c['run_id']:
@@ -353,66 +555,21 @@ Finish one logical deliverable/correction and save checkpoint.json. Missing outp
             ident = str(time.time_ns()) + '-' + uuid.uuid4().hex
             review = receipt.parent.parent.name == 'reviews'
             envelope = {'id': ident, 'run_id': self.c['run_id'], 'session_id': self.c['pi_session_id'], 'kind': 'review' if review else 'notice', 'message': message, 'receipt': str(receipt), 'created_at': time.time()}
-            atomic(inbox / (ident + '.message.json'), envelope)
-            atomic(receipt, {'transport': 'pi', 'status': 'queued', 'message_id': ident})
+            if self.c.get('protocol_version') == 2:
+                envelope.update(protocol_version=2, schema_version=1)
+            if trigger_turn is not None:
+                envelope['trigger_turn'] = trigger_turn
+            if notice_type is not None:
+                envelope['notice_type'] = notice_type
+            if report_key is not None:
+                envelope['report_key'] = report_key
+            persist(inbox / (ident + '.message.json'), envelope)
+            persist(receipt, {'transport': 'pi', 'status': 'queued', 'message_id': ident})
             return
         with receipt.open('wb') as output:
             p = subprocess.run(['codex', 'queue', '--thread', self.c['thread_id'], '--model', self.c['review_model'], '--message', message], cwd=self.root / 'work', stdout=output, stderr=subprocess.STDOUT, timeout=45)
         if p.returncode:
             raise RuntimeError('Codex queue failed; inspect local receipt. No automatic duplicate retry.')
-
-    def review(self):
-        cycle = self.state['cycle']
-        cp, snap = validate_checkpoint(self.c, cycle)
-        self.status('running', phase='evaluating', cycle=cycle)
-        directory = self.root / 'reviews' / f'{cycle:03}'
-        directory.mkdir(parents=True)
-        stdout = directory / 'eval.stdout'
-        stderr = directory / 'eval.stderr'
-        try:
-            with stdout.open('wb') as out, stderr.open('wb') as err:
-                p = subprocess.run(self.c['eval_argv'], cwd=self.root / 'work', stdout=out, stderr=err, timeout=min(120, self.remaining()))
-            code = p.returncode
-        except subprocess.TimeoutExpired:
-            code = 124
-        if not unchanged(self.c, snap):
-            raise RuntimeError('Artifacts changed during eval; checkpoint must be recreated')
-        request = {'run_id': self.c['run_id'], 'cycle': cycle, **snap, 'checkpoint': cp, 'eval': {'exit_code': code, 'stdout': str(stdout), 'stderr': str(stderr)}}
-        atomic(directory / 'request.json', request)
-        atomic(directory / 'checkpoint.json', cp)
-        failure = (code, snap['evidence_sha256'], digest(stdout), digest(stderr)) if code else None
-        if failure is not None and failure == self.last_failure:
-            raise RuntimeError('Repeated identical eval failure without artifact progress; human decision needed')
-        self.last_failure = failure
-        review_path = directory / 'review.json'
-        script = Path(__file__).resolve()
-        message = f'''Authorized Pi/{self.c['mode']} checkpoint review for run {self.c['run_id']}, cycle {cycle}.
-Read {directory / 'request.json'}, {self.c['task']}, and only listed evidence in {self.root / 'work'}. Read eval outputs; independently check the logical result. Do not load full Pi logs unless needed for a blocker. Worker is waiting, no dependent work will run yet.
-Return decision using: python3 {script} decide --config {self.root / 'config.json'} --cycle {cycle} --decision <continue|revise|complete|wait_human|stop> --feedback '<specific short feedback>'.
-continue=verified intermediate result, revise=repairable within existing scope, complete=all task requirements verified and eval exit0, wait_human=actual missing access/secret/approval/user choice. An exhausted budget or repeated identical failure needs a user-facing report. Iteration completed/exit0 is never success by itself. Missing initial outputs mean bootstrap, not automatic human escalation.
-If human action is required, write wait_human and ask the precise question here; do not fabricate approval or include secrets. Later, after the user's actual resolution, replace that decision with --human-resolved and continue/revise as appropriate. Otherwise finish automatic review without asking the human to confirm routine next steps. Only review; do not modify worker evidence, launch another Pi, navigate sites, or expand authorization. Do not disclose private raw outputs in chat. This callback was explicitly authorized by the user. {REPORT_GUIDANCE}
-'''
-        self.status('waiting_pi' if self.c['review_transport'] == 'pi' else 'waiting_codex', request=str(directory / 'request.json'))
-        self.queue_message(message, directory / 'queue-receipt.txt')
-        deadline = time.monotonic() + self.c['review_seconds']
-        last_wait = False
-        while time.monotonic() < deadline:
-            self.next(0.25)
-            if not review_path.exists():
-                continue
-            result = read(review_path)
-            decision = validate_review(self.c, request, result)
-            if not unchanged(self.c, snap):
-                raise RuntimeError('Evidence changed after review request; refusing stale approval')
-            if decision == 'wait_human':
-                if not last_wait:
-                    self.status('waiting_human', reason=result['feedback'])
-                    last_wait = True
-                continue
-            self.event('review.applied', cycle=cycle, decision=decision)
-            self.status('running')
-            return result
-        raise TimeoutError('Review/human wait limit reached; work remains stopped')
 
     def shutdown(self):
         if self.proc and self.proc.poll() is None:
@@ -426,51 +583,6 @@ If human action is required, write wait_human and ask the precise question here;
                 except subprocess.TimeoutExpired:
                     os.killpg(self.proc.pid, signal.SIGKILL)
 
-    def run(self):
-        for folder in ('work', 'reviews', 'sessions'):
-            (self.root / folder).mkdir(exist_ok=True)
-        lock = (self.root / 'bridge.lock').open('a')
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if (self.root / 'bridge-status.json').exists():
-            raise RuntimeError('Run already started. Inspect saved session/state; never silently replay it.')
-        self.contract()
-        feedback = None
-        try:
-            self.spawn()
-            for cycle in range(1, self.c['max_cycles'] + 1):
-                self.state['cycle'] = cycle
-                atomic(self.root / 'work/cycle-context.json', {'run_id': self.c['run_id'], 'cycle': cycle, 'feedback': feedback})
-                self.status('running')
-                if self.c['mode'] == 'goal':
-                    self.goal_cycle(feedback)
-                else:
-                    self.ralph_cycle(feedback)
-                result = self.review()
-                if result['decision'] == 'stop':
-                    self.status('stopped', reason=result['feedback'])
-                    return 2
-                if result['decision'] == 'complete':
-                    if self.c['mode'] == 'goal':
-                        self.goal_cycle(final=True)
-                    request = read(self.root / 'reviews' / f'{cycle:03}' / 'request.json')
-                    if not unchanged(self.c, request):
-                        raise RuntimeError('Artifacts changed after final acceptance')
-                    self.status('complete', reason=result['feedback'])
-                    self.queue_message(f'Pi/{self.c["mode"]} reviewed run {self.c["run_id"]} is complete. Read {self.root / "bridge-status.json"}, {self.root / "reviews" / f"{cycle:03}" / "request.json"}, {self.root / "reviews" / f"{cycle:03}" / "review.json"}, and relevant checkpoint/evidence. {REPORT_GUIDANCE} Do not rerun anything.', self.root / 'final-queue-receipt.txt')
-                    return 0
-                feedback = result['feedback']
-            raise RuntimeError('Cycle budget exhausted; human decision needed before further work')
-        except Exception as error:
-            self.status('attention_required', reason=str(error))
-            try:
-                self.queue_message(f'Pi/{self.c["mode"]} run {self.c["run_id"]} stopped and needs attention. Read {self.root / "bridge-status.json"}, compact bridge-events.jsonl, and the latest available checkpoint/review/eval evidence; inspect Pi session/stderr only if needed. {REPORT_GUIDANCE} Explain the failure or exhausted limit, what is verified versus unknown, and ask only for required human action. Do not automatically restart or expand scope.', self.root / 'attention-queue-receipt.txt')
-            except Exception as delivery:
-                self.event('attention.delivery_failed', reason=str(delivery))
-            return 1
-        finally:
-            self.shutdown()
-
-
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest='command', required=True)
@@ -482,26 +594,30 @@ def main():
     decide.add_argument('--decision', required=True, choices=['continue', 'revise', 'complete', 'wait_human', 'stop'])
     decide.add_argument('--feedback', required=True)
     decide.add_argument('--human-resolved', action='store_true')
+    for name in ('resume', 'wake'):
+        resume = commands.add_parser(name)
+        resume.add_argument('--config', required=True)
+    review2 = commands.add_parser('review-v2')
+    review2.add_argument('--config', required=True)
+    review2.add_argument('--review-id', type=int)
+    review2.add_argument('--decision', choices=['endorse', 'halt', 'stop'], required=True)
+    review2.add_argument('--assessment', help='Independent action/criterion assessment JSON; required for endorse')
+    review2.add_argument('--feedback', required=True)
+    human = commands.add_parser('human')
+    human.add_argument('--config', required=True)
+    resource = commands.add_parser('signal')
+    resource.add_argument('--config', required=True)
+    resource.add_argument('--event-id', required=True)
+    resource.add_argument('--wake-ref', required=True)
+    operation = commands.add_parser('operation')
+    operation.add_argument('--config', required=True)
+    operation.add_argument('--action-id', required=True)
+    operation.add_argument('--operation-id', required=True)
+    operation.add_argument('--owner', required=True)
     args = parser.parse_args()
     c = load_config(args.config)
-    if args.command == 'run':
-        return Bridge(c).run()
-    directory = Path(c['root']) / 'reviews' / f'{args.cycle:03}'
-    request = read(directory / 'request.json')
-    state = read(Path(c['root']) / 'bridge-status.json')
-    if state['cycle'] != args.cycle or state['status'] not in {'waiting_codex', 'waiting_pi', 'waiting_human'}:
-        raise ValueError('No matching live review wait')
-    result = {key: request[key] for key in ('run_id', 'cycle', 'checkpoint_sha256')}
-    result.update(decision=args.decision, feedback=args.feedback, human_resolved=args.human_resolved)
-    validate_review(c, request, result)
-    if not unchanged(c, request):
-        raise ValueError('Worker evidence changed; refusing stale review')
-    target = directory / 'review.json'
-    if target.exists() and read(target).get('decision') != 'wait_human':
-        raise ValueError('Decision already recorded; no duplicate delivery')
-    atomic(target, result)
-    print(json.dumps({'recorded': args.decision, 'cycle': args.cycle}))
-    return 0
+    from action_bridge import dispatch
+    return dispatch(c, args)
 
 
 if __name__ == '__main__':

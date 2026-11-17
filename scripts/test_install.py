@@ -16,6 +16,10 @@ REQUIRED = (
     'scripts/check.sh',
     '.githooks/pre-commit',
     'eslint.config.mjs',
+    'scripts/action_protocol.py',
+    'scripts/action_bridge.py',
+    'scripts/test_action_faults.py',
+    'docs/action-scoped-protocol.md',
 )
 PRIVATE = ('.pi-ping-pong', 'node_modules', '.venv', '.git', '.pytest_cache', 'dist')
 UNRELATED = (

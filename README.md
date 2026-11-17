@@ -1,106 +1,46 @@
-<div align="center">
+# Pi Ping Pong
 
-# 🏓 Pi Ping Pong
+Pi Ping Pong is a local controller for running a coding task in Pi with explicit scope, acceptance criteria, and finite execution limits. A Worker does the work; a separate Reviewer checks what its tests and other evidence do not settle. Core decides whether to continue, wait, stop, or record verified acceptance.
 
-### One AI builds. Another checks. Feedback goes back automatically.
-
-Give your coding agent a second pair of eyes—without copying messages between chats.
-
-**Pi · Goal / Ralph · Pi or Codex reviewer**
-
-[Get started](#get-started) · [Full guide](docs/GUIDE.md) · [Roadmap](docs/ROADMAP.md) · [Documentation](docs/README.md)
-
-</div>
-
----
-
-## Less copy-paste. More checked work.
-
-You ask an AI to build something. It says “done.” You check it, find a problem, and paste feedback into its chat. Repeat.
-
-Pi Ping Pong connects those steps. A **worker** changes your files. A separate **reviewer** checks the result and a fresh task-specific test, then sends feedback back to the worker. They repeat within limits you choose.
+A passing test suite answers only the questions it actually checks. A Worker can finish with a green suite and still miss a requirement, change something outside scope, or leave the result hard to verify. The point of the separate review is to examine those gaps, not to run the same tests again or to treat a second model's opinion as proof.
 
 ```mermaid
-flowchart LR
-    You["You set the task + limits"] --> Worker["🛠 Worker builds"]
-    Worker --> Check["🧪 Independent check runs"]
-    Check --> Reviewer["🔎 Reviewer checks the result"]
-    Reviewer -->|Needs changes| Worker
-    Reviewer -->|Requirements verified| Done["🏁 Complete"]
+flowchart TD
+    Task["Task, scope, criteria, limits"] --> Core["Core dispatches authorized work"]
+    Core --> Worker["Worker changes files and runs tests"]
+    Worker -->|Retained result and test evidence| Review["Independent Reviewer checks remaining questions"]
+    Review -->|Assessment or review limitation| Decision["Core decides from validated evidence"]
+    Decision -->|Authorized next step within limits| Core
+    Decision -->|Human input needed| Wait["Group requests after independent work"]
+    Decision -->|Verified finish or stop| Report["Report result and what was verified"]
 ```
 
-For example: ask for a dark-mode toggle with tests. The worker builds it; checks and review catch missing requirements; feedback returns automatically.
+Core keeps working on eligible actions when another action is blocked. If review is unavailable or evidence is incomplete, Core preserves the result and reports what remains unverified. Uncertainty alone does not send the Worker back to make another change. Verified acceptance (`finish`) requires all criteria to pass, completed actions, resolved blockers, and reconciled effects; neither native completion nor a Reviewer endorsement is enough.
 
-## What you get
+## Execution modes
 
-- **A second review.** A separate AI session checks the worker's result.
-- **Checks beyond “looks done.”** A task-specific test runs independently at each review point.
-- **Automatic feedback.** Corrections return to the worker; no manual chat relay.
-- **Bounded runs.** You choose cycle and time limits. Real blockers come back to you.
-- **Your choice of agents.** Pi runs the worker through Goal or Ralph; review happens in Pi or Codex.
+| Worker mode | When independent review happens | Main Worker limits |
+|---|---|---|
+| **Ping-pong** | After each settled ordinary Pi Worker iteration. | Cumulative iterations and active Worker time; per-iteration time and a separate checkpoint-repair bound. |
+| **Goal** | After a native Goal completes or reaches a real limit, not after every progress checkpoint. Corrections keep the same Pi history. | Cumulative active Worker time and number of native Goal launches; optional cumulative token cap. |
+| **Ralph** | After a bounded native multi-iteration loop returns a result or reaches a real limit. | Cumulative native iterations and active Worker time; per-iteration time. |
+
+Review has its own finite deadline. Corrections use remaining allowance rather than opening a new run budget. See the [run contract](references/reviewed-runs.md) for grants, recovery, and exact accounting.
 
 ## Get started
 
-You'll need **macOS or Linux**, **Python 3.9+**, **Node.js 22.19+**, and a configured **Pi CLI with Goal/Ralph extensions and model access**. New to Pi? Follow the [requirements and dependency setup](docs/GUIDE.md#requirements) first. Codex is optional for the Pi review route.
+1. From a checkout, run `python3 scripts/install.py` to install the skill and Pi receiver. Install Pi, model access, and any extension required by the chosen mode separately. See [requirements and installation](docs/GUIDE.md#requirements).
+2. Open Pi in the project you want the Worker to edit. Run `/reload` if you just installed the receiver. In Git projects, make sure `.pi-ping-pong/` is ignored before preparing a run.
+3. Describe the task, allowed paths, and how you'd judge the result. Run `/ppp <name>` with an unused lowercase kebab-case name. Review the generated `TASK.md`, `config.json`, models, and limits. Preparation does not start the Worker.
+4. Run `/ppp <name>` again when the draft is ready and you want to launch. Use `/ppp-status` to inspect it. With headless review, the launching chat reports progress and collects confirmed human responses through `/ppp-respond`; a separate Pi session reviews the result.
 
-### 1. Install from the checkout
+Example task: “Add a dark-mode toggle. Limit edits to `src/` and `tests/`. The preference should survive reload and the toggle must work by keyboard. Run the project's tests and report any browser behavior you couldn't verify. Prepare the run with finite limits, but don't launch yet.”
 
-```sh
-git clone https://github.com/SzpakLabs/pi-ping-pong.git
-cd pi-ping-pong
-python3 scripts/install.py
-```
+## Boundaries
 
-The installer copies the skill and Pi receiver, backing up differing files. Install Pi, Goal/Ralph, and credentials separately. [Installation details →](docs/GUIDE.md#install)
+- **Works in place.** The Worker acts on the selected project, including uncommitted files. Keep private run records out of version control. The default headless Reviewer has read-only built-in tools, but this is not an OS sandbox. Task scope and budgets grant no commit, push, or deploy permission.
+- **Local runtime, configured model access.** Keep the host and Pi reporting session available. Model calls may incur usage charges. Codex is an optional review transport with [its own prerequisites](docs/GUIDE.md#quick-start-reviewer-in-codex); it is not a Worker mode. No Claude Code runtime or specific Claude model/provider combination is verified here.
+- **No in-place migration.** Prepare new protocol 2 / schema 1 runs without a separate evaluator. Protocol 1 and evaluator-era configs/runs cannot launch or resume on this runtime; their files are left alone.
+- **Local checks are not live validation.** Tests with synthetic processes check runtime behavior, not model judgment, provider compatibility, or unattended operation after closing the launching UI. [Manual validation](docs/manual-e2e.md) is separate.
 
-### 2. Describe your task in Pi
-
-Open Pi in your project. Add `.pi-ping-pong/` to that project's `.gitignore` so private run files stay out of Git. After installation, run:
-
-```text
-/reload
-```
-
-Tell Pi what to build, how to check it, which files it may change, and which worker provider/model to use. For example:
-
-> Add a dark-mode toggle and tests. You may edit src/ and tests/. Help me choose an available worker model, a test command, and finite cycle/time limits. Prepare the run without launching it.
-
-Then choose a short run name:
-
-```text
-/ppp dark-mode
-```
-
-This prepares the task, check, and settings using your conversation. Answer any missing-input questions, then review the generated files and limits.
-
-### 3. Launch when ready
-
-Run the same command again to start the prepared run:
-
-```text
-/ppp dark-mode
-```
-
-Check progress with `/ppp-status`. Use `/ppp` to open the runs menu. Feedback returns to this Pi conversation; keep Pi and the host running. A previously launched name shows status—use a new name for new work.
-
-Prefer reviewing in Codex? Follow the [Codex setup](docs/GUIDE.md#quick-start-reviewer-in-codex).
-
-## Know before you run
-
-**Local prototype.** Setup takes some terminal work; compatibility depends on your environment. [Validation status and limitations →](docs/GUIDE.md#goal-and-ralph-modes)
-
-Both agents need access to the same files. They use your configured model access and can consume paid usage. A passing test or an AI saying “done” does not prove every requirement or visual detail is correct. Run limits do not provide an operating-system sandbox or grant commit, push, or deploy permission.
-
-## Go deeper
-
-| Looking for… | Read |
-|---|---|
-| Setup, versions, daily commands, Codex, mobile, and limitations | [User guide](docs/GUIDE.md) |
-| Config files, review decisions, transport, and recovery boundaries | [Run contract](references/reviewed-runs.md) |
-| Instructions for your AI agent | [Skill](SKILL.md) |
-| Proposed future work and design | [Roadmap](docs/ROADMAP.md) · [Target architecture](docs/ARCHITECTURE.md) |
-| Development checks and maintenance rules | [Development guide](docs/GUIDE.md#development-checks) · [AGENTS.md](AGENTS.md) |
-
----
-
-[MIT License](LICENSE) · Copyright © 2026 Artem Litvinko
+[User guide](docs/GUIDE.md) · [Documentation](docs/README.md) · [Skill](SKILL.md) · [MIT License](LICENSE)

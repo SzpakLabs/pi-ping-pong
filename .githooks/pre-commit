@@ -1,4 +1,5 @@
 #!/bin/sh
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT" || exit 1
-exec npm run check
+# Keep commits fast: full validation belongs to `make test` or `make test-commit`.
+exec git diff --cached --check

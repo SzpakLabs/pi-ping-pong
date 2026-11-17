@@ -6,9 +6,6 @@ status=0
 run() {
   "$@" || status=1
 }
-run npm run lint
-run npm run typecheck
-run uv run --locked ruff check .
-run python3 -B scripts/test_bridge.py
-run node scripts/test_pi_receiver.mjs
+run bun run check:python
+run bun run check:ts
 exit "$status"
