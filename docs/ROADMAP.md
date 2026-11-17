@@ -1,5 +1,7 @@
 # Pi Ping Pong — Development Roadmap v7
 
+> Historical plan (October 2026), preserved for context. The evaluator lifecycle, target architecture, milestone order, and validation gates below are not current setup instructions or release evidence. See the [current architecture](ARCHITECTURE.md), [protocol](action-scoped-protocol.md), and [user guide](GUIDE.md).
+
 Date: 2026-10-18
 
 Status: development plan with an agreed product-priority addendum; implementation and release status are separate.
@@ -167,6 +169,10 @@ Acceptance: fixtures cover every listed outcome, long names/narrow displays, unk
 
 Programmatic CLI execution and structured events are a plausible adapter route, not implemented PPP support. Investigate worker execution first, then an independent reviewer, and separately event delivery into an already open Claude session. No local live compatibility was established in this discussion (`claude` was not found in PATH). Keep this behind the agreed Pi usability/control, installation and execution work; do not substitute an Anthropic Pi provider setting for a Claude CLI runtime adapter.
 
+### Deferred write/edit path hook
+
+An optional partial hook on write/edit outside the target (Pi `tool_call`, not a shell sandbox) is deferred. Later evaluate whether it helps more (catches path typos and accidental writes) or hinders (false blocks, maintaining an allowed-directory list).
+
 ## Development sequence
 
 Versions are milestones, not calendar commitments. The v0.2 subdivisions are delivery checkpoints within the same milestone. A small comparative benchmark begins there; v0.5 expands it. The promo site can proceed independently once its baseline claims are verified.
@@ -271,7 +277,7 @@ Use deterministic preflight for prerequisites and artifact validity before spend
 
 For the current incomplete feature, preserve the source diff, baseline, prior decisions and rejected checkpoints. Complete trusted artifact generation, then finish status/lifecycle, notifications/diagnostics, tests and documentation before final integration acceptance. Any authorized follow-up has its own recorded identity and an explicit link to earlier evidence. Recovery must retain the applicable cumulative cycle/time limits, including the original deadline when authorized only within remaining limits. A new budget requires explicit authorization; do not add cycles until tests happen to pass or describe a manual follow-up as automatic recovery. A bounded live dogfooding run follows deterministic checks only when separately authorized and needed for an unverified runtime behavior.
 
-Run `npm run check` before real launches or commits. Protocol/receiver changes also require the existing Python and Node test suites, covered by that gate. Live model runs need task authorization and separate evidence. Release changes need the applicable independent checks and human approval; an experimental worker must not overwrite the supervisor governing its work.
+Use the relevant fast language check for code changes; `bun run check` runs both before real launches. Run slow bridge/fault integration suites only when changes touch their behavior areas, as defined in [AGENTS.md](../AGENTS.md). Protocol/receiver changes require the relevant Python and Node suites. Live model runs need task authorization and separate evidence. Release changes need the applicable independent checks and human approval; an experimental worker must not overwrite the supervisor governing its work.
 
 Preserve CLI/config contracts, legacy skill aliases and Pi session entries. Document schema/config migrations and recovery compatibility. Install authorized runtime updates from this canonical directory; do not maintain divergent runtime implementations or patch vendor packages/global Goal/Ralph settings.
 

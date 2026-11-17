@@ -1,0 +1,77 @@
+{
+  "commit": "8ad1193b261aed27d75a6df352bd4c542aac7f0e",
+  "implementation_diff": "none for CORE; smoke fixture/profile helpers pinned in files",
+  "node": "v26.6.0",
+  "python": "3.15.0a1 (main, Oct 28 2025, 14:02:08) [Clang 17.0.0 (clang-1700.0.13.5)]",
+  "os": "macOS-15.5-x86_64-i386-64bit-Mach-O",
+  "files": {
+    "scripts/bridge.py": "657c8356c5158563abcbf10bc18cf530a2eb280a58c529475f0a7372fce2389b",
+    "scripts/action_bridge.py": "5fd10520c3bfee103eaf85893c2374741e7ea6dcfb1c5cb1907018f5bf60cf98",
+    "scripts/action_protocol.py": "6c6c8f223eade5cd5387d0e71f833a6699b5e9ab8f446558e53cf9e7e480c121",
+    "extensions/pi-reviewed.ts": "7335314cf3135a58b562b1fc97a36f76f450a8180e66f2af20dbc591c9692b52",
+    "scripts/prepare_goal_smoke.py": "ad2ff10e9231df914d64bfae6e9ed60269d6152161d17858ff32e3171360187f",
+    "scripts/fixtures/goal_smoke_eval.py": "dde9f5699a04457413f14cb536283621cde1c4c8df19c6144c05d19c5361ec54",
+    "scripts/test_goal_smoke.py": "a4274ff8ea1c39eac411c490f126a030ecfc1ea8ba0967fb312c04f62f442e3b",
+    "scripts/test_goal_profile.mjs": "4aaed1f484e8413379ab40a50cb5d08d1b9a11833089e27a2dc2af3b44d2d7d7",
+    "scripts/test_runtime_boundaries.mjs": "a239645da8f6af726763a75545bf78b0faae35c2b3c6ffc86d73a78c2f422fff",
+    "package-lock.json": "150b78de0bf47002a42c6bd7499042283dd2434e2d839f658de7dee8a3530db6",
+    "uv.lock": "8651f09469eebabfa0666c237fedad228b8afa0418100b12a0af7bca3c5907e9",
+    "/usr/local/Cellar/node/26.6.0/bin/node": "c9f2cf7bcd77dcb09ea007183618005a9c30a8fc079e70d23259f3b772e25b14",
+    "/Users/macos/.pyenv/versions/3.15.0a1/bin/python3.15": "1c4813e8611586645ecb05a5523b4fab2c59a18f3418ef8af34b654df6a46251",
+    "/Users/macos/.pi/agent/install/releases/1.3.0/package-lock.json": "65eacda789c30e1c3859a96eee2fd53cf4a18629d27dcf2aa6d7bdb3da02d719",
+    "/Users/macos/.pi/agent/npm/package-lock.json": "fd57e1c9f816a8fb4db2f682134b56d828982ba3e07c847f3b0f28816df5d36d"
+  },
+  "runtime_trees": {
+    "/Users/macos/.pi/agent/install/releases/1.3.0/node_modules": {
+      "sha256": "f187dd0a299df5426fe96c68cbaba65effc4915c6212203adb239bf082a18879",
+      "files": 9244,
+      "bytes": 67888489
+    },
+    "/Users/macos/.pi/agent/npm/node_modules/@narumitw/pi-goal": {
+      "sha256": "4ce8765000de9a0bb1eb869742e8f4f4baafe414cf80adeb5fcefe38cd502008",
+      "files": 28,
+      "bytes": 439531
+    },
+    "/Users/macos/.pi/agent/npm/node_modules/@narumitw/pi-tui-kit": {
+      "sha256": "2b167203f7600131a7af081707cb45feca14138bbb59f1ed9e904f36bb30ff8e",
+      "files": 69,
+      "bytes": 270925
+    }
+  },
+  "versions": {
+    "pi": "1.3.0",
+    "goal": "0.54.13",
+    "ralph": "2.1.0"
+  },
+  "models": {
+    "worker": "openai-codex/gpt-6-luna",
+    "reviewer": "openai-codex/gpt-6.1-sol",
+    "thinking": "low",
+    "pin_limit": "Exact IDs confirmed by installed Pi 1.3.0 catalog and Pi 1.4.0 auth checks (oauth ready); private profile requires native /login openai-codex. No immutable weight or server entitlement claim.",
+    "authentication": "ChatGPT subscription OAuth only; no API key, pay-as-you-go, credential copy, or API fallback",
+    "accounting": "Provider-reported tokens and available subscription limits; catalog USD estimates are not subscription charges"
+  },
+  "dirty_input_diff_sha256": "62715b492905504041146002aa2a373f2863cebaaaff24163709bb6667609670",
+  "dirty_input_diff_note": "prepared before the bridge code/test and runtime docs/test scopes were separated; frozen execution bytes are now in the code-only commit",
+  "ralph_reference_only": {
+    "root": "/Users/macos/.pi/agent/npm/node_modules/@lnilluv/pi-ralph-loop",
+    "sha256": "07adff4dc717913deef5046992b006dbcaf31047b2b7656c8cd5e6aec8d30110",
+    "files": 14,
+    "bytes": 401078
+  },
+  "executables": {
+    "node": "/usr/local/Cellar/node/26.6.0/bin/node",
+    "python3": "/Users/macos/.pyenv/versions/3.15.0a1/bin/python3.15"
+  },
+  "dependency_versions": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-tui": "1.3.0",
+    "@earendil-works/pi-agent-core": "1.3.0",
+    "jiti": "2.7.0",
+    "typebox": "1.3.27",
+    "@narumitw/pi-tui-kit": "0.59.0"
+  },
+  "source_head_observed": "105bcaf8d3df62a1f33258f6bafd1bb637f4e598",
+  "execution_pin_note": "Frozen four-file execution snapshot from commit; current HEAD may differ only if actual bytes still equal frozen commit and file manifest. Source HEAD is recorded separately.",
+  "post_candidate_tooling_diff_sha256": "2a736a3226ca926360c0a2fad505085a7a3fed9beb5e3f5239649689158e57d8"
+}
