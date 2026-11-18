@@ -19,15 +19,93 @@ const runNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const safeRunId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(value);
 const read = <T>(file: string): T => JSON.parse(fs.readFileSync(file, 'utf8')) as T;
-function atomic(file: string, data: unknown) {
+function atomicText(file: string, text: string) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  fs.writeFileSync(temporary, text, { mode: 0o600, flag: 'wx' });
   fs.chmodSync(temporary, 0o600);
   const fd = fs.openSync(temporary, 'r');
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(temporary, file);
   const directory = fs.openSync(path.dirname(file), 'r');
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+function atomic(file: string, data: unknown) {
+  atomicText(file, `${JSON.stringify(data, null, 2)}\n`);
+}
+function skipWhitespace(text: string, from: number) {
+  while (from < text.length && /\s/.test(text[from])) from++;
+  return from;
+}
+function scanStringEnd(text: string, from: number) {
+  if (text[from] !== '"') throw new Error('Malformed config.json object key.');
+  for (let i = from + 1; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === '"') return i + 1;
+  }
+  throw new Error('Unterminated string in config.json.');
+}
+function scanValueEnd(text: string, from: number) {
+  let i = skipWhitespace(text, from);
+  if (text[i] === '"') return scanStringEnd(text, i);
+  let depth = 0;
+  let inString = false;
+  for (; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (char === '\\') i++;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth++;
+    else if (char === '}' || char === ']') {
+      if (!depth) break;
+      depth--;
+    } else if (char === ',' && !depth) break;
+  }
+  return text.slice(from, i).trimEnd().length + from;
+}
+function bindConfigText(text: string, updates: Record<string, unknown>, removals: string[]) {
+  let cursor = skipWhitespace(text, 0);
+  if (text[cursor++] !== '{') throw new Error('config.json must contain an object.');
+  const members: Array<{ key: string; keyStart: number; valueStart: number; valueEnd: number; comma?: number }> = [];
+  cursor = skipWhitespace(text, cursor);
+  while (text[cursor] !== '}') {
+    const keyStart = cursor;
+    const keyEnd = scanStringEnd(text, cursor);
+    const key = JSON.parse(text.slice(keyStart, keyEnd)) as string;
+    cursor = skipWhitespace(text, keyEnd);
+    if (text[cursor++] !== ':') throw new Error('Malformed config.json object member.');
+    const valueStart = skipWhitespace(text, cursor);
+    const valueEnd = scanValueEnd(text, valueStart);
+    cursor = skipWhitespace(text, valueEnd);
+    const comma = text[cursor] === ',' ? cursor++ : undefined;
+    members.push({ key, keyStart, valueStart, valueEnd, comma });
+    cursor = skipWhitespace(text, cursor);
+    if (comma === undefined) break;
+  }
+  if (text[cursor] !== '}' || skipWhitespace(text, cursor + 1) !== text.length) throw new Error('Malformed config.json object.');
+  const touched = new Set([...Object.keys(updates), ...removals]);
+  for (const key of touched) if (members.filter(member => member.key === key).length > 1) throw new Error(`Duplicate config field: ${key}`);
+  const edits: Array<{ start: number; end: number; value: string }> = [];
+  members.forEach((member, index) => {
+    if (Object.hasOwn(updates, member.key)) edits.push({ start: member.valueStart, end: member.valueEnd, value: JSON.stringify(updates[member.key]) });
+    if (removals.includes(member.key)) {
+      const prior = members[index - 1];
+      edits.push(member.comma !== undefined
+        ? { start: member.keyStart, end: member.comma + 1, value: '' }
+        : prior?.comma !== undefined ? { start: prior.comma, end: member.valueEnd, value: '' }
+          : { start: member.keyStart, end: member.valueEnd, value: '' });
+    }
+  });
+  const missing = Object.entries(updates).filter(([key]) => !members.some(member => member.key === key));
+  if (missing.length) {
+    const last = members.at(-1);
+    const insertion = last ? last.valueEnd : cursor;
+    edits.push({ start: insertion, end: insertion, value: `${last ? ',' : ''}${missing.map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`).join(',')}` });
+  }
+  let result = text;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.value + result.slice(edit.end);
+  JSON.parse(result);
+  return result;
 }
 function isPrivate(stat: fs.Stats) { return (stat.mode & 0o077) === 0; }
 function regularFile(file: string) {
@@ -608,10 +686,10 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     const task = typeof config.task === 'string' ? path.resolve(root, config.task) : '';
     if (!regularPrivateRunFile(root, task)) throw new Error('Launch needs a private TASK file inside the run.');
     const sessionId = ctx.sessionManager.getSessionId();
-    config.review_transport = 'pi';
-    config.pi_session_id = sessionId;
-    if (!headless) config.review_provider = ctx.model!.provider;
-    delete config.thread_id;
+    const boundConfigText = bindConfigText(fs.readFileSync(file, 'utf8'), {
+      review_transport: 'pi', pi_session_id: sessionId,
+      ...(!headless ? { review_provider: ctx.model!.provider } : {}),
+    }, ['thread_id']);
     let attemptFd: number;
     try { attemptFd = fs.openSync(attemptFile, 'wx', 0o600); }
     catch (error) {
@@ -620,7 +698,11 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     }
     try { fs.writeFileSync(attemptFd, `${JSON.stringify({ session_id: sessionId, at: Date.now() })}\n`); fs.fchmodSync(attemptFd, 0o600); }
     finally { fs.closeSync(attemptFd); }
-    atomic(file, config);
+    atomicText(file, boundConfigText);
+    config.review_transport = 'pi';
+    config.pi_session_id = sessionId;
+    if (!headless) config.review_provider = ctx.model!.provider;
+    delete config.thread_id;
     const binding = { root, runId: config.run_id, sessionId };
     receiver(binding, true);
     fs.mkdirSync(path.join(root, 'pi-inbox'), { recursive: true, mode: 0o700 });

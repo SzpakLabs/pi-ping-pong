@@ -589,7 +589,10 @@ try {
   const headlessConfig = { ...tempConfig(headlessDir), protocol_version: 2, schema_version: 1,
     review_execution: 'headless', review_provider: 'Test-independent-provider', review_model: 'Test-independent-model',
     execution_contract: preflightConfig.execution_contract };
-  write(path.join(headlessDir, 'config.json'), headlessConfig);
+  const headlessConfigPath = path.join(headlessDir, 'config.json');
+  const headlessConfigText = `${JSON.stringify(headlessConfig).slice(0, -1)},"thread_id":"Test-old-thread","nested_extension":{"exact":9007199254740993,"values":[9007199254740995,{"mtime_ns":1782320241724273514}]}}\n`;
+  fs.writeFileSync(headlessConfigPath, headlessConfigText, { mode: 0o600 });
+  chmodPrivate(headlessConfigPath);
   const modelBeforeHeadless = ctx.model;
   ctx.model = { id: 'Test-human-chat-model', provider: 'Test-human-chat-provider' };
   await runCommand('ppp', path.join(headlessDir, 'config.json'));
@@ -598,6 +601,11 @@ try {
   assert.equal(boundHeadless.review_model, 'Test-independent-model', 'headless reviewer model does not depend on Chat A model');
   assert.equal(boundHeadless.review_provider, 'Test-independent-provider', 'launcher must not overwrite independent reviewer provider');
   assert.equal(boundHeadless.pi_session_id, 'Test-session', 'Chat A remains the human/report binding only');
+  const boundHeadlessText = fs.readFileSync(headlessConfigPath, 'utf8');
+  assert.match(boundHeadlessText, /"exact":9007199254740993/, 'headless binding preserves unsafe integer literals in nested fields');
+  assert.match(boundHeadlessText, /"mtime_ns":1782320241724273514/, 'headless binding preserves unrelated exact nanosecond values');
+  assert.equal(boundHeadless.thread_id, undefined, 'headless Pi launch also removes a stale thread binding');
+  assert.equal(fs.statSync(headlessConfigPath).mode & 0o777, 0o600, 'headless-bound config remains private');
   const inboxBeforeHeadless = messages.length;
   for (const [id, kind, trigger, noticeType] of [['Test-independent-report', 'notice', false, 'report'], ['Test-forbidden-review-turn', 'review', true, undefined], ['Test-chat-a-reporter', 'notice', true, 'reporter'], ['Test-disguised-review', 'review', true, 'reporter']]) {
     write(path.join(headlessDir, 'pi-inbox', `${id}.message.json`), {
@@ -640,11 +648,19 @@ try {
   ctx.model = modelBeforeHeadless;
 
   const readyLaunch = makeReadyRun('ready-launch-run');
-  await runCommand('pi-ping-pong', 'ready-launch-run');
+  const readyLaunchConfig = path.join(readyLaunch, 'config.json');
+  const preciseLaunchText = `${JSON.stringify(tempConfig(readyLaunch)).slice(0, -1)},"thread_id":"Test-old-thread","large_integer":9007199254740993,"unknown_extension":{"nested":[1782320241724273514,{"value":9007199254740995}]}}\n`;
+  fs.writeFileSync(readyLaunchConfig, preciseLaunchText, { mode: 0o600 });
+  chmodPrivate(readyLaunchConfig);
+  await runCommand('pi-ping-pong', readyLaunchConfig);
   await waitForChild();
   const launchedConfig = JSON.parse(fs.readFileSync(path.join(readyLaunch, 'config.json'), 'utf8'));
   assert.equal(launchedConfig.pi_session_id, 'Test-session', 'session binding happens only at actual launcher time');
   assert.equal(launchedConfig.review_transport, 'pi');
+  assert.equal(launchedConfig.thread_id, undefined, 'Pi launch removes legacy thread binding');
+  assert.match(fs.readFileSync(readyLaunchConfig, 'utf8'), /"large_integer":9007199254740993/, 'chat-bound config preserves unsafe integer literal');
+  assert.match(fs.readFileSync(readyLaunchConfig, 'utf8'), /"value":9007199254740995/, 'chat-bound config preserves nested unknown numeric literal');
+  assert.equal(fs.statSync(readyLaunchConfig).mode & 0o777, 0o600, 'chat-bound config remains private');
   assert.ok(fs.existsSync(path.join(readyLaunch, 'launch-attempt.json')), 'ready named run uses the shared existing launcher');
   assert.ok(entries.length >= 2, 'only actual launches attach run session entries');
 
