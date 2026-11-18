@@ -6,7 +6,7 @@
 - [Current architecture](ARCHITECTURE.md) and [diagrams](architecture-diagrams.md): component ownership, mode boundaries, review decisions, and recovery.
 - [Run contract](../references/reviewed-runs.md) and [protocol 2 / schema 1](action-scoped-protocol.md): configuration, assessment schema, budgets, operations, and compatibility.
 - [Headless Reviewer](headless-reviewer.md): separate reviewer session, evidence, failure handling, and Chat A reporting.
-- [Project workspace](project-workspace.md): in-place edits, Ralph storage, and limited launch comparisons/fallback discovery.
+- [Project workspace](project-workspace.md): in-place edits, [private run storage](project-workspace.md#private-run-storage), Ralph storage, and limited launch comparisons/fallback discovery.
 - [Evaluator-era compatibility](evaluator-preparation.md): prepare a new run; older configs and runs are not migrated.
 - [Manual E2E](manual-e2e.md) and [private report template](manual-e2e-report-template.md): separate user-operated validation, not an acceptance claim.
 - [Development checks](GUIDE.md#development-checks) and [maintenance instructions](../AGENTS.md).

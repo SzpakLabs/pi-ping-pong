@@ -23,7 +23,7 @@ At a review boundary Core binds the run, cycle, current state, checkpoint (if an
 
 ## Workspace, waits, and recovery
 
-Worker operates on the selected project in place; `.pi-ping-pong/` retains private run state, logs, and evidence. The [workspace notes](project-workspace.md) describe Ralph task storage, bounded fallback discovery, and the best-effort Git launch comparison for dirty/untracked-at-launch files. These are inspection aids, not complete snapshots or attribution of changes to Worker.
+Worker operates on the selected project in place; [project run storage](project-workspace.md#private-run-storage) retains private run state, logs, and evidence. The [workspace notes](project-workspace.md) describe Ralph task storage, bounded fallback discovery, and the best-effort Git launch comparison for dirty/untracked-at-launch files. These are inspection aids, not complete snapshots or attribution of changes to Worker.
 
 Core runs independent work before grouping genuine human requests and may pause for an explicit budget grant or a recorded resource event. Confirmed input is addressed to the same run; it is not automatic resolution or a budget reset. Reminders do not spend Worker/model turns. Resume/wake reconcile durable ownership, prior reviews, and operation effects before acting. An ambiguous external effect or attempted review is not blindly replayed. There is no implied permission to commit, push, deploy, or exceed task scope.
 

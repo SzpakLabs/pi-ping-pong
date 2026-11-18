@@ -1,6 +1,6 @@
 # Manual E2E — <attempt>
 
-Copy into ignored `.pi-ping-pong/manual-e2e/<attempt>/report.md` **before preparation**, not into tracked docs. Keep private (directory 0700, file 0600). Replace placeholders with observations or `unknown`/`not received`; never fabricate a timestamp, zero count, decision or PASS. This template is not a completed run report. Reports sent to the launching chat must put the task result before paths and follow the ordered **STATUS → TL;DR → Summary → Report → Suggested action → Full run status** contract in [reviewed-run guidance](../references/reviewed-runs.md). The chat report must remain readable without opening artifacts; evidence paths support claims but do not replace explaining what happened.
+Copy into `.pi/ping-pong/manual-e2e/<attempt>/report.md` **before preparation**, not into tracked docs. Keep it out of Git. Keep private (directory 0700, file 0600). Replace placeholders with observations or `unknown`/`not received`; never fabricate a timestamp, zero count, decision or PASS. This template is not a completed run report. Reports sent to the launching chat must put the task result before paths and follow the ordered **STATUS → TL;DR → Summary → Report → Suggested action → Full run status** contract in [reviewed-run guidance](../references/reviewed-runs.md). The chat report must remain readable without opening artifacts; evidence paths support claims but do not replace explaining what happened.
 
 ## Status
 

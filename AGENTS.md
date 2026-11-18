@@ -33,7 +33,7 @@ Existing implementation and historical documentation may not yet satisfy this co
 - Human escalation requires an actual missing input, access, approval or choice. Never invent approval or silently reset limits.
 - Keep existing CLI/config contracts and Pi receiver session entries compatible. Explain migrations when compatibility cannot be retained.
 - Do not patch vendor packages or change global Goal/Ralph settings as a side effect.
-- Keep private artifacts out of tracked source; ignored `.pi-ping-pong/` inside the existing worktree is valid for manual E2E. Use synthetic fixtures. Simulated people must have Test in their names.
+- Keep private artifacts out of tracked source; use private `.pi/ping-pong/` in the existing worktree for new manual E2E and preserve legacy `.pi-ping-pong/`. Use synthetic fixtures. Simulated people must have Test in their names.
 - For user-operated E2E, follow docs/manual-e2e.md: ordinary installed Pi/subscription, existing worktree, report before preparation, three case prompts. Do not impose historical pinned-runtime/private-HOME/snapshot/profile-smoke gates. Keep old experiments as history; record actual failures and missing results without silently relaunching.
 - Put supplementary documentation (guides, designs, feature specs and notes) in docs/ and link it from docs/README.md. Keep README.md, AGENTS.md and SKILL.md in the root; preserve references/reviewed-runs.md as the operational skill contract.
 - Run python3 -B scripts/test_bridge.py and node scripts/test_pi_receiver.mjs for protocol/receiver changes. Live model runs require task authorization; unit tests do not imply live acceptance.

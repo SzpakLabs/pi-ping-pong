@@ -30,7 +30,7 @@ Review has its own finite deadline. Corrections use remaining allowance rather t
 ## Get started
 
 1. From a checkout, run `python3 scripts/install.py` to install the skill and Pi receiver. Install Pi, model access, and any extension required by the chosen mode separately. See [requirements and installation](docs/GUIDE.md#requirements).
-2. Open Pi in the project you want the Worker to edit. Run `/reload` if you just installed the receiver. In Git projects, make sure `.pi-ping-pong/` is ignored before preparing a run.
+2. Open Pi in the project you want the Worker to edit. Run `/reload` if you just installed the receiver. New runs use `.pi/ping-pong/runs/`; [Git exclusion is best effort](docs/project-workspace.md#private-run-storage), not a preparation or launch requirement.
 3. Describe the task, allowed paths, and how you'd judge the result. Run `/ppp <name>` with an unused lowercase kebab-case name. Review the generated `TASK.md`, `config.json`, models, and limits. Preparation does not start the Worker.
 4. Run `/ppp <name>` again when the draft is ready and you want to launch. Use `/ppp-status` to inspect it. With headless review, the launching chat reports progress and collects confirmed human responses through `/ppp-respond`; a separate Pi session reviews the result.
 
@@ -40,7 +40,7 @@ Example task: “Add a dark-mode toggle. Limit edits to `src/` and `tests/`. The
 
 - **Works in place.** The Worker acts on the selected project, including uncommitted files. Keep private run records out of version control. The default headless Reviewer has read-only built-in tools, but this is not an OS sandbox. Task scope and budgets grant no commit, push, or deploy permission.
 - **Local runtime, configured model access.** Keep the host and Pi reporting session available. Model calls may incur usage charges. Codex is an optional review transport with [its own prerequisites](docs/GUIDE.md#quick-start-reviewer-in-codex); it is not a Worker mode. No Claude Code runtime or specific Claude model/provider combination is verified here.
-- **No in-place migration.** Prepare new protocol 2 / schema 1 runs without a separate evaluator. Protocol 1 and evaluator-era configs/runs cannot launch or resume on this runtime; their files are left alone.
+- **No in-place migration.** Existing `.pi-ping-pong/runs/` runs stay discoverable at their original paths. Prepare new protocol 2 / schema 1 runs without a separate evaluator. Protocol 1 and evaluator-era configs/runs cannot launch or resume on this runtime; their files are left alone.
 - **Local checks are not live validation.** Tests with synthetic processes check runtime behavior, not model judgment, provider compatibility, or unattended operation after closing the launching UI. [Manual validation](docs/manual-e2e.md) is separate.
 
 [User guide](docs/GUIDE.md) · [Documentation](docs/README.md) · [Skill](SKILL.md) · [MIT License](LICENSE)
