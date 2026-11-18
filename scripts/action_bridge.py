@@ -724,7 +724,7 @@ At logical boundary write {self.root / 'work/checkpoint.json'} (always this abso
             if fd is not None:
                 directory = target
                 self.exclude_ralph_artifacts(target)
-                limitation = 'Native snapshot observes the target, but includes .pi-ping-pong service changes and is bounded to 200 files / 2 MiB; not authorship or acceptance.'
+                limitation = 'Native snapshot observes the target, but can include PPP service changes from .pi/ping-pong and .pi-ping-pong and is bounded to 200 files / 2 MiB; not authorship or acceptance.'
         self.ralph_directory = directory
         self.ralph_argument = argument if directory == target else '.'
         self.ralph_guards = self.rpc_cwd / '.ralph-runner/ppp-guards'
@@ -1185,7 +1185,7 @@ Save progress and final checkpoint at {self.root / 'work/checkpoint.json'}, cycl
                     p.require(not outputs.private_path(raw.name) and raw.resolve() == raw.absolute(), 'Private or symlinked referenced output omitted')
                     candidate = evidence_path(self.c, str(raw))
                     scope = self.root / 'work' if candidate.is_relative_to(self.root / 'work') else Path(self.c['execution_contract']['target']).resolve()
-                    p.require(not outputs.private_path(candidate.relative_to(scope)), 'Private referenced output omitted')
+                    p.require((scope == self.root / 'work' or not outputs.service_path(candidate)) and not outputs.private_path(candidate.relative_to(scope)), 'Private referenced output omitted')
                     if candidate.is_file():
                         p.require(candidate.stat().st_size <= outputs.MAX_FILE_BYTES, 'Oversized referenced output omitted')
                         name = str(candidate.relative_to(self.root / 'work')) if candidate.is_relative_to(self.root / 'work') else str(candidate)
@@ -1213,7 +1213,7 @@ Save progress and final checkpoint at {self.root / 'work/checkpoint.json'}, cycl
         for name, expected in list(selected.items())[:limit]:
             try:
                 candidate = evidence_path(self.c, name)
-                p.require(not outputs.private_path(candidate.name), 'Private candidate omitted')
+                p.require((candidate.is_relative_to(self.root / 'work') or not outputs.service_path(candidate)) and not outputs.private_path(candidate.name), 'Private candidate omitted')
                 with candidate.open('rb') as stream:
                     content = stream.read(outputs.MAX_FILE_BYTES + 1)
                 p.require(len(content) <= outputs.MAX_FILE_BYTES and b'\0' not in content, 'Non-text or oversized candidate omitted')

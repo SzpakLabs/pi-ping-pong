@@ -8,9 +8,9 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@e
 type Binding = { root: string; runId: string; sessionId: string };
 type Config = { run_id: string; review_model: string; review_provider?: string; [key: string]: unknown };
 type Envelope = { id: string; run_id: string; session_id: string; kind: string; message: string; receipt: string; trigger_turn?: boolean; notice_type?: string; report_key?: string; protocol_version?: number; schema_version?: number };
-type Project = { root: string; fallback: boolean; git: boolean };
+type Project = { root: string; fallback: boolean; git: 'repository' | 'absent' | 'unknown' };
 type RunState = 'draft/incomplete' | 'ready to launch' | 'starting' | 'running' | 'waiting review' | 'waiting human' | 'waiting resource' | 'waiting event' | 'completed' | 'stopped' | 'attention required' | 'unknown/malformed';
-type RunInfo = { name: string; dir?: string; state: RunState; mode?: string; worker?: string; reviewer?: string; details?: string; config?: Config };
+type RunInfo = { name: string; store?: string; label?: string; dir?: string; state: RunState; mode?: string; worker?: string; reviewer?: string; details?: string; config?: Config };
 type LaunchWatch = { root: string; runId: string; deadline: number; notified?: string };
 const statusKey = 'pi-ping-pong';
 const entryType = 'pi-reviewed-run';
@@ -155,85 +155,113 @@ function inside(parent: string, child: string) {
   const relative = path.relative(parent, child);
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
-function assertPrivateDirectoryChain(root: string, target: string, create: boolean) {
-  const resolvedRoot = fs.realpathSync(root);
-  const resolvedTarget = path.resolve(target);
-  if (!inside(resolvedRoot, resolvedTarget)) throw new Error('Run storage path escapes the confirmed project root.');
-  const relative = path.relative(resolvedRoot, resolvedTarget).split(path.sep);
-  let current = resolvedRoot;
-  for (const part of relative) {
-    current = path.join(current, part);
-    try {
-      const stat = fs.lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Refusing non-directory or symlink in private run path: ${current}`);
-      if (!isPrivate(stat)) throw new Error(`Private run directory has permissive permissions: ${current}`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !create) throw error;
-      fs.mkdirSync(current, { mode: 0o700 });
-      fs.chmodSync(current, 0o700);
-      const stat = fs.lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !isPrivate(stat)) throw new Error(`Could not create a private run directory: ${current}`);
-    }
-  }
+const currentStore = '.pi/ping-pong/runs';
+const legacyStore = '.pi-ping-pong/runs';
+const fallbackStore = '.pi/reviewed-runs/named';
+function projectStores(project: Project) {
+  return project.fallback ? [fallbackStore] : [currentStore, legacyStore];
 }
-function existingPrivateDirectoryChain(root: string, target: string) {
+function privateDirectoryChain(root: string, target: string, create = false, sharedPi = false) {
   const resolvedRoot = fs.realpathSync(root);
   const resolvedTarget = path.resolve(target);
   if (!inside(resolvedRoot, resolvedTarget)) throw new Error('Run storage path escapes the confirmed project root.');
   let current = resolvedRoot;
   for (const part of path.relative(resolvedRoot, resolvedTarget).split(path.sep)) {
     current = path.join(current, part);
-    try {
-      const stat = fs.lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !isPrivate(stat)) throw new Error(`Refusing non-private or symlink run storage: ${current}`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw error;
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(current); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!create) return false;
+      try { fs.mkdirSync(current, { mode: 0o700 }); fs.chmodSync(current, 0o700); }
+      catch (race) {
+        if ((race as NodeJS.ErrnoException).code !== 'EEXIST') throw race;
+      }
+      stat = fs.lstatSync(current);
     }
+    // An existing project .pi also holds Pi settings. Keep its mode; only PPP's own chain must be private.
+    const safeMode = sharedPi && current === path.join(resolvedRoot, '.pi') ? (stat.mode & 0o022) === 0 : isPrivate(stat);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Refusing non-directory or symlink in run storage: ${current}`);
+    if (!safeMode) throw new Error(`Run storage has permissive permissions: ${current}`);
   }
   return true;
 }
-function runStorage(project: Project) {
-  return project.fallback
-    ? path.join(project.root, '.pi', 'reviewed-runs', 'named')
-    : path.join(project.root, '.pi-ping-pong', 'runs');
-}
 function projectGitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  const localVars = execFileSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' });
+  const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' };
+  const localVars = execFileSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const name of localVars.trim().split(/\s+/)) delete env[name];
   return env;
 }
-function ignoredByGit(project: Project, name: string) {
-  if (!project.git || project.fallback) return true;
+function git(cwd: string, args: string[], env: NodeJS.ProcessEnv) {
+  return execFileSync('git', ['-C', cwd, ...args], { env, timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+function gitProject(cwd: string): { root: string; git: Project['git'] } {
   try {
-    execFileSync('git', ['-C', project.root, 'check-ignore', '-q', '--', `.pi-ping-pong/runs/${name}`], { stdio: 'ignore', env: projectGitEnv() });
-    return true;
+    const root = git(cwd, ['rev-parse', '--show-toplevel'], projectGitEnv()).replace(/\r?\n$/, '');
+    return { root: fs.realpathSync(root), git: 'repository' };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException & { status?: number }).status;
-    if (code === 1) return false;
-    throw new Error('Could not verify Git ignore status for private run artifacts.');
+    const stderr = (error as { stderr?: string }).stderr;
+    return { root: fs.realpathSync(cwd), git: stderr?.includes('not a git repository') ? 'absent' : 'unknown' };
   }
 }
-async function resolveProject(ctx: ExtensionContext): Promise<Project | undefined> {
+const localRule = '/.pi/ping-pong/';
+function addLocalExclude(exclude: string) {
+  if (!fs.lstatSync(path.dirname(exclude)).isDirectory()) throw new Error('Git info path is not a real directory.');
+  // Serialize PPP writers (including linked worktrees) without replacing or truncating user rules.
+  const lock = `${exclude}.lock`;
+  const lease = fs.openSync(lock, 'wx', 0o600);
   try {
-    const root = execFileSync('git', ['-C', ctx.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: projectGitEnv() }).trim();
-    return { root: fs.realpathSync(root), fallback: false, git: true };
-  } catch {
-    const cwd = path.resolve(ctx.cwd);
-    if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
-      return { root: fs.realpathSync(cwd), fallback: false, git: false };
+    const { O_RDWR, O_APPEND, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    const fd = fs.openSync(exclude, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o644);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('Git exclude is not a regular, unshared file.');
+      const text = fs.readFileSync(fd).toString('latin1');
+      if (!text.split(/\r?\n/).includes(localRule)) fs.writeFileSync(fd, `${text && !text.endsWith('\n') ? '\n' : ''}${localRule}\n`);
+    } finally { fs.closeSync(fd); }
+  } finally { fs.closeSync(lease); fs.unlinkSync(lock); }
+}
+function warnIfVisible(ctx: ExtensionCommandContext, project: Project, dir: string) {
+  if (project.fallback || project.git === 'absent') return;
+  let reason = 'Git ignore status could not be verified';
+  try {
+    if (project.git !== 'repository') throw new Error(reason);
+    const env = projectGitEnv();
+    const relative = path.relative(project.root, dir).split(path.sep).join('/');
+    const ignored = () => {
+      try { git(project.root, ['check-ignore', '-q', '--', `${relative}/`], env); return true; }
+      catch (error) { if ((error as { status?: number }).status === 1) return false; throw error; }
+    };
+    let protectedByIgnore = ignored();
+    if (!protectedByIgnore && path.dirname(dir) === path.join(project.root, currentStore)) {
+      try {
+        // Resolve the common Git directory, not the exclude file (Git can dereference the latter).
+        const common = git(project.root, ['rev-parse', '--git-common-dir'], env).replace(/\r?\n$/, '');
+        const exclude = path.resolve(project.root, common, 'info', 'exclude');
+        addLocalExclude(exclude);
+      } catch { reason = 'the local Git exclude could not be updated'; }
+      protectedByIgnore = ignored();
     }
-    if (!ctx.hasUI) {
-      ctx.ui.notify('Current project folder is unavailable. No project runs were read or created; select an existing project folder.', 'warning');
-      return undefined;
-    }
-    const fallback = path.join(os.homedir(), '.pi', 'reviewed-runs');
-    if (await ctx.ui.confirm('Use the private fallback run store?', `No project root was confirmed. Named runs will be stored under ${fallback}/named/<name>/; existing legacy runs remain untouched.`)) {
-      return { root: fs.realpathSync(os.homedir()), fallback: true, git: false };
-    }
+    if (git(project.root, ['ls-files', '-z', '--', `:(literal)${relative}/`], env)) reason = 'some run files are already tracked; ignore rules cannot hide them';
+    else if (protectedByIgnore) return;
+    else if (reason === 'Git ignore status could not be verified') reason = 'Git does not ignore this run directory';
+  } catch { reason = 'Git ignore status could not be verified'; }
+  const message = `Private run artifacts at ${dir} are not known to be fully Git-ignored: ${reason}. File permissions still apply; do not commit these artifacts.`;
+  ctx.ui.notify(message, 'warning');
+  if (!ctx.hasUI) process.stderr.write(`${message}\n`);
+}
+async function resolveProject(ctx: ExtensionContext): Promise<Project | undefined> {
+  const cwd = path.resolve(ctx.cwd);
+  if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) return { ...gitProject(cwd), fallback: false };
+  if (!ctx.hasUI) {
+    ctx.ui.notify('Current project folder is unavailable. No project runs were read or created; select an existing project folder.', 'warning');
     return undefined;
   }
+  const fallback = path.join(os.homedir(), '.pi', 'reviewed-runs');
+  if (await ctx.ui.confirm('Use the private fallback run store?', `No project root was confirmed. Named runs will be stored under ${fallback}/named/<name>/; existing legacy runs remain untouched.`)) {
+    return { root: fs.realpathSync(os.homedir()), fallback: true, git: 'absent' };
+  }
+  return undefined;
 }
 function statusLabel(value: unknown): RunState | undefined {
   if (value === 'running') return 'running';
@@ -306,15 +334,18 @@ function inspectRun(name: string, dir: string): RunInfo {
   return { name, dir, state: 'draft/incomplete', mode, worker, reviewer, details: `Preparation is incomplete: ${incomplete.join(', ')}.`, config };
 }
 function listRuns(project: Project): RunInfo[] {
-  const parent = runStorage(project);
-  if (!existingPrivateDirectoryChain(project.root, parent)) return [];
-  const stat = fs.lstatSync(parent);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || !isPrivate(stat)) throw new Error('Run storage must be a private, non-symlink directory.');
-  const runs = fs.readdirSync(parent, { withFileTypes: true }).map(entry => {
-    if (!validRunName(entry.name)) return { name: '[invalid run name]', dir: undefined, state: 'unknown/malformed' as const, details: 'A direct entry has an unsafe or unsupported name.' };
-    if (entry.isSymbolicLink() || !entry.isDirectory()) return { name: entry.name, state: 'unknown/malformed' as const, details: 'Entry is not a regular run directory.' };
-    return inspectRun(entry.name, path.join(parent, entry.name));
-  });
+  const runs: RunInfo[] = [];
+  for (const store of projectStores(project)) {
+    const parent = path.join(project.root, store);
+    try {
+      if (!privateDirectoryChain(project.root, parent, false, store === currentStore)) continue;
+      for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
+        if (!validRunName(entry.name)) runs.push({ store, name: '[invalid run name]', state: 'unknown/malformed', details: 'A direct entry has an unsafe or unsupported name.' });
+        else if (!entry.isDirectory()) runs.push({ store, name: entry.name, state: 'unknown/malformed', details: 'Entry is not a regular run directory.' });
+        else runs.push({ ...inspectRun(entry.name, path.join(parent, entry.name)), store });
+      }
+    } catch (error) { runs.push({ store, name: store, state: 'unknown/malformed', details: String(error) }); }
+  }
   const ids = new Map<string, RunInfo[]>();
   for (const run of runs) {
     const id = run.config?.run_id;
@@ -326,22 +357,32 @@ function listRuns(project: Project): RunInfo[] {
       run.details = 'Duplicate run_id detected in this project; launch is refused.';
     }
   }
+  return labelCollisions(runs);
+}
+function labelCollisions(runs: RunInfo[]) {
+  const counts = new Map<string, number>();
+  for (const { name } of runs) counts.set(name, (counts.get(name) ?? 0) + 1);
+  for (const run of runs) if (counts.get(run.name)! > 1) run.label = `${run.name} [${run.store ?? run.dir}]`;
   return runs;
+}
+function managedPath(dir: string) {
+  for (const store of [currentStore, legacyStore]) {
+    const suffix = path.sep + store.split('/').join(path.sep);
+    const parent = path.dirname(dir);
+    if (parent.endsWith(suffix)) return { root: parent.slice(0, -suffix.length) || path.parse(parent).root, store };
+  }
 }
 function verifyNamedRun(project: Project, name: string, dir: string) {
   if (!validRunName(name)) throw new Error('Unsafe named run.');
-  if (!ignoredByGit(project, name)) throw new Error(`Private run artifacts are not Git-ignored. Add .pi-ping-pong/ to ${project.root}/.gitignore and verify with git check-ignore before preparation or launch.`);
-  assertPrivateDirectoryChain(project.root, runStorage(project), false);
-  const expected = path.join(runStorage(project), name);
-  if (path.resolve(dir) !== path.resolve(expected)) throw new Error('Named run path does not match its reserved project location.');
-  const stat = fs.lstatSync(expected);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700) throw new Error('Named run directory is not a private 0700 directory.');
+  const store = projectStores(project).find(candidate => dir === path.join(project.root, candidate, name));
+  if (!store) throw new Error('Named run path does not match its reserved project location.');
+  if (!privateDirectoryChain(project.root, dir, false, store === currentStore)) throw new Error('Named run directory is unavailable.');
+  if ((fs.lstatSync(dir).mode & 0o777) !== 0o700) throw new Error('Named run directory is not a private 0700 directory.');
 }
 function reserveRun(project: Project, name: string) {
-  if (!validRunName(name)) throw new Error(`Run name must be ASCII lowercase kebab-case, 1–${maxRunNameLength} characters (example: add-linters-2).`);
-  if (!ignoredByGit(project, name)) throw new Error(`Private run artifacts are not Git-ignored. Add .pi-ping-pong/ to ${project.root}/.gitignore, verify with git check-ignore, then retry; no run was created.`);
-  const parent = runStorage(project);
-  assertPrivateDirectoryChain(project.root, parent, true);
+  const store = projectStores(project)[0];
+  const parent = path.join(project.root, store);
+  privateDirectoryChain(project.root, parent, true, store === currentStore);
   const dir = path.join(parent, name);
   fs.mkdirSync(dir, { mode: 0o700 }); // exclusive: EEXIST is never overwritten
   fs.chmodSync(dir, 0o700);
@@ -356,7 +397,11 @@ function reserveRun(project: Project, name: string) {
 function draftFiles(dir: string) {
   return fs.readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isFile() && !entry.isSymbolicLink()).map(entry => entry.name).sort();
 }
-function preparationPrompt(project: Project, name: string, dir: string, continuation: boolean, reviewerDefault: string, taskDescription = '') {
+function launchArgument(name: string, dir: string, usePath: boolean) {
+  const file = path.join(dir, 'config.json');
+  return usePath ? (file.includes(' ') ? `"${file}"` : file) : name;
+}
+function preparationPrompt(project: Project, name: string, dir: string, continuation: boolean, reviewerDefault: string, taskDescription = '', usePath = false) {
   const files = continuation ? draftFiles(dir).filter(file => file !== '.draft.json') : [];
   return `Prepare a Pi Ping Pong run from this conversation. Reuse all task details, criteria, project context, and decisions already provided; ask only concise grouped questions for genuinely missing inputs. Do not start or launch the worker during preparation.
 
@@ -368,7 +413,7 @@ ${continuation ? `This is an incomplete existing run. Read existing entries befo
 
 Write only TASK.md and config.json inside the exact reserved run directory. Do not overwrite .draft.json or write task outputs during preparation. Do not create eval.py, eval_argv or any separate evaluator/preflight. Worker implements the task and runs ordinary tests; independent Reviewer assesses only what tests cannot establish and concrete defects; Core validates and decides. Chat A receives reports, never becomes Core. No mandatory model preflight or pre/post review repeats.
 
-TASK.md must state actual user requirements, allowed paths, checkable acceptance criteria and ordinary test commands where known. Work in the selected current project with its actual uncommitted changes. For a new project use the confirmed repository root as product target (a private fallback store is not a product target; take the actual authorized target from the task, ask only if missing); modify an existing project in place; respect an explicitly requested subdirectory or file. Record absolute product target and project command cwd in TASK.md and use that actual path in execution_contract.target. .pi-ping-pong run/work is service storage only, never the default product directory. No mandatory auto-commit, clean Git, separate worktree, fetch or routine approval. Preserve unrelated user changes and existing untracked/ignored local configuration; do not read or copy secrets. A bounded launch snapshot is fallback discovery only, not a preflight or proof of authorship/tests/acceptance; missing or partial snapshots must not block work or delivery. Expected behavior follows the actual requirement and observed before/after state, including multiplicities; a merely changed value is not enough. Do not invent names, selectors, storage formats, scenarios or approvals. Missing checks are unknown/not_tested, not automatic product failures. Worker retains test commands, exits, output and relevant artifacts with its checkpoint; Reviewer uses those results without rerunning or re-proving deterministic checks. Missing review evidence must not hide available work or prevent independent authorized work. Report delivery separately from verified acceptance.
+TASK.md must state actual user requirements, allowed paths, checkable acceptance criteria and ordinary test commands where known. Work in the selected current project with its actual uncommitted changes. For a new project use the confirmed repository root as product target (a private fallback store is not a product target; take the actual authorized target from the task, ask only if missing); modify an existing project in place; respect an explicitly requested subdirectory or file. Record absolute product target and project command cwd in TASK.md and use that actual path in execution_contract.target. The reserved run/work is service storage only, never the default product directory. No mandatory auto-commit, clean Git, separate worktree, fetch or routine approval. Preserve unrelated user changes and existing untracked/ignored local configuration; do not read or copy secrets. A bounded launch snapshot is fallback discovery only, not a preflight or proof of authorship/tests/acceptance; missing or partial snapshots must not block work or delivery. Expected behavior follows the actual requirement and observed before/after state, including multiplicities; a merely changed value is not enough. Do not invent names, selectors, storage formats, scenarios or approvals. Missing checks are unknown/not_tested, not automatic product failures. Worker retains test commands, exits, output and relevant artifacts with its checkpoint; Reviewer uses those results without rerunning or re-proving deterministic checks. Missing review evidence must not hide available work or prevent independent authorized work. Report delivery separately from verified acceptance.
 
 For browser tasks, determine one usable Playwright route when practical: prefer explicitly configured/project-installed runtime, then ordinary installed Pi-accessible runtime. Verify module resolution/browser availability where practical without a model or installing dependencies. Record actual command/module resolution and cwd in TASK.md for both Goal and Ralph. Core resolves the module once and passes its absolute entry as PPP_PLAYWRIGHT_MODULE to Worker; prefer require(process.env.PPP_PLAYWRIGHT_MODULE). Module resolution does not establish browser/auth availability. Do not hardcode a host-specific path or make availability a launch gate; record the limitation and continue independent work.
 
@@ -376,17 +421,18 @@ Use protocol_version=2 and schema_version=1. config.json needs a unique RFC 4122
 
 Include execution_contract: target (absolute authorized output/source path for filesystem tasks), actions (stable id, description, depends_on, pre-authorized operations), complete criteria ID/description map, closure={authorized:true,max_cycles:null} only where actual initial task authority permits closure, reminder_seconds=86400 unless configured otherwise. Cwd/Git ancestry grants no authority. Retain actual scope, approval and side-effect restrictions. Never fabricate closure authorization, identity, human input or budget. Old evaluator-era runs cannot resume with this implementation; preserve their files, do not migrate them silently.
 
-Keep the complete run-storage chain private 0700; TASK.md and config.json mode 0600. No secrets. Do not write pi_session_id, launch-attempt.json or session entries; explicit launch binds identity. Do not run Worker, Goal/Ralph, bridge run, or paid/live checks during preparation.
+Keep PPP run directories private 0700; leave existing Pi settings permissions unchanged. Keep TASK.md and config.json mode 0600. No secrets. Do not write pi_session_id, launch-attempt.json or session entries; explicit launch binds identity. Do not run Worker, Goal/Ralph, bridge run, or paid/live checks during preparation.
 
-Report task, criteria and ordinary tests, mode, worker/reviewer models, allowed paths, finite limits, exact run/config paths and limitations. State no worker started; give explicit launch command \`/pi-ping-pong ${name}\`. Incomplete: list grouped genuine missing inputs and preserve draft. Visible report: standalone STATUS — line; blank lines around separate headings ### TL;DR, ### Summary, ### Report, ### Suggested action, ### Full run status. Put content below headings; short paragraphs/bullets, commands in fenced text. Use available facts only; no extra reads just to fill status.`;
+Report task, criteria and ordinary tests, mode, worker/reviewer models, allowed paths, finite limits, exact run/config paths and limitations. State no worker started; give explicit launch command \`/pi-ping-pong ${launchArgument(name, dir, usePath)}\`. Incomplete: list grouped genuine missing inputs and preserve draft. Visible report: standalone STATUS — line; blank lines around separate headings ### TL;DR, ### Summary, ### Report, ### Suggested action, ### Full run status. Put content below headings; short paragraphs/bullets, commands in fenced text. Use available facts only; no extra reads just to fill status.`;
 }
-function sendPreparation(pi: ExtensionAPI, ctx: ExtensionCommandContext, project: Project, name: string, dir: string, continuation: boolean, taskDescription = '') {
+function sendPreparation(pi: ExtensionAPI, ctx: ExtensionCommandContext, project: Project, name: string, dir: string, continuation: boolean, taskDescription = '', usePath = false) {
   try { verifyNamedRun(project, name, dir); }
   catch (error) { ctx.ui.notify(String(error), 'error'); return; }
+  warnIfVisible(ctx, project, dir);
   const reviewerDefault = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'no Pi model is selected';
-  const prompt = preparationPrompt(project, name, dir, continuation, reviewerDefault, taskDescription);
+  const prompt = preparationPrompt(project, name, dir, continuation, reviewerDefault, taskDescription, usePath);
   pi.sendUserMessage(prompt, ctx.isIdle() ? undefined : { deliverAs: 'followUp' });
-  ctx.ui.notify(`Preparation prompt sent for ${name}; no worker was started. After preparation, explicitly launch with /pi-ping-pong ${name}.`, 'info');
+  ctx.ui.notify(`Preparation prompt sent for ${name}; no worker was started. After preparation, explicitly launch with /pi-ping-pong ${launchArgument(name, dir, usePath)}.`, 'info');
 }
 function details(info: RunInfo) {
   const config = info.config;
@@ -394,7 +440,7 @@ function details(info: RunInfo) {
     ? `Limits: cycles=${displayValue(config.max_cycles)}, cycle_seconds=${displayValue(config.cycle_seconds)}, review_seconds=${displayValue(config.review_seconds)}, wall_seconds=${displayValue(config.wall_seconds)}`
     : '';
   return [
-    `${info.name}: ${info.state}`,
+    `${info.label ?? info.name}: ${info.state}`,
     `Directory: ${info.dir ?? '(unsafe entry; not followed)'}`,
     `Config: ${info.dir ? path.join(info.dir, 'config.json') : '—'}`,
     `Mode: ${info.mode ?? '—'}`,
@@ -402,11 +448,11 @@ function details(info: RunInfo) {
     `Reviewer: ${info.reviewer ?? '—'}`,
     bounds,
     info.details ?? '',
-    info.state === 'ready to launch' ? `Explicit launch: /pi-ping-pong ${info.name}` : '',
+    info.state === 'ready to launch' ? `Explicit launch: /pi-ping-pong ${launchArgument(info.name, info.dir!, Boolean(info.label))}` : '',
   ].filter(Boolean).join('\n');
 }
 function formatRun(info: RunInfo) {
-  return `${info.name} — ${info.state} — ${info.mode ?? 'mode unknown'} — ${info.worker ?? 'worker unknown'}`;
+  return `${info.label ?? info.name} — ${info.state} — ${info.mode ?? 'mode unknown'} — ${info.worker ?? 'worker unknown'}`;
 }
 function statusView(info: RunInfo, binding?: Binding) {
   const root = info.dir ?? binding?.root;
@@ -448,13 +494,13 @@ function statusView(info: RunInfo, binding?: Binding) {
 function compactStatus(info: RunInfo, binding?: Binding) {
   const view = statusView(info, binding);
   const detail = view.reason || (['unknown/malformed', 'draft/incomplete', 'attention required'].includes(view.label) ? info.details : '');
-  return [`${info.name} — ${view.label}`, `Cycles: ${view.cycle}${view.config?.protocol_version === 2 ? ` · Main remaining: ${view.mainRemaining}` : `/${view.maximum}`}`,
+  return [`${info.label ?? info.name} — ${view.label}`, `Cycles: ${view.cycle}${view.config?.protocol_version === 2 ? ` · Main remaining: ${view.mainRemaining}` : `/${view.maximum}`}`,
     ...(view.goalUsage ? [view.goalUsage] : []), ...(detail ? [detail] : []), `Next: ${view.next}`].join('\n');
 }
 function detailedStatus(info: RunInfo, binding?: Binding) {
   const { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, goalUsage } = statusView(info, binding);
   return [
-    `${info.name}: ${label} (phase ${phase})`,
+    `${info.label ?? info.name}: ${label} (phase ${phase})`,
     `Mode: ${info.mode ?? 'unavailable'}; cycle ${cycle}/${maximum}; elapsed ${elapsed}; state age ${age}`,
     ...(config?.protocol_version === 2 ? [`Protocol: 2/schema 1; cumulative ledger: ${root ? path.join(root, 'execution-state.json') : 'unavailable'}`, `Main remaining: ${mainRemaining}; closure uses separate initial authority. Initial max_cycles is not a cumulative total.`, ...(Array.isArray(state?.blockers) ? state.blockers.map(b => `${displayValue(b.id)}: ${displayValue(b.status)} / ${displayValue(b.escalation)} — ${displayValue(b.needed)}`) : []), 'Human input: /ppp-respond opens a confirmed action menu; questions are not authorizations. Advanced: /ppp-respond <run-id> <JSON>.'] : []),
     ...(goalUsage ? [goalUsage] : []),
@@ -667,13 +713,23 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     if (path.basename(file) !== 'config.json') throw new Error('Expected an existing config.json path.');
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error(`Config not found: ${file}`);
     const root = path.dirname(file);
-    // Explicit project paths must obey the same storage checks as named launches.
-    if (path.basename(path.dirname(root)) === 'runs' && path.basename(path.dirname(path.dirname(root))) === '.pi-ping-pong') {
-      assertPrivateDirectoryChain(path.dirname(path.dirname(path.dirname(root))), root, false);
+    // Validate both managed trees without changing arbitrary explicit-path or session-entry semantics.
+    const managed = managedPath(root);
+    let project = namedRun?.project;
+    let canonicalRun = root;
+    if (managed) {
+      const canonicalRoot = fs.realpathSync(managed.root);
+      project ??= { ...gitProject(canonicalRoot), fallback: false };
+      canonicalRun = path.join(canonicalRoot, managed.store, path.basename(root));
+      if (!privateDirectoryChain(canonicalRoot, canonicalRun, false, managed.store === currentStore)) throw new Error('Run directory is unavailable.');
     }
     if (!regularPrivateFile(file)) throw new Error('Config must be a private regular non-symlink file.');
     const config = read<Config>(file);
     if (!config.run_id || !config.review_model || !['goal', 'ralph', 'ping-pong'].includes(String(config.mode))) throw new Error('Config needs run_id, mode=goal|ralph|ping-pong and review_model.');
+    if (project && listRuns({ ...project, root: fs.realpathSync(managed?.root ?? project.root) })
+      .some(info => info.dir !== canonicalRun && info.config?.run_id === config.run_id)) {
+      throw new Error('Duplicate run_id detected in this project; launch is refused.');
+    }
     const headless = config.review_execution === 'headless';
     if (config.review_execution !== undefined && !['chat', 'headless'].includes(String(config.review_execution))) throw new Error('Unknown review_execution.');
     if (headless && (config.protocol_version !== 2 || typeof config.review_provider !== 'string' || !config.review_provider.trim())) throw new Error('Headless review needs protocol 2 and explicit review_provider.');
@@ -690,6 +746,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       review_transport: 'pi', pi_session_id: sessionId,
       ...(!headless ? { review_provider: ctx.model!.provider } : {}),
     }, ['thread_id']);
+    if (project) warnIfVisible(ctx, project, canonicalRun);
     let attemptFd: number;
     try { attemptFd = fs.openSync(attemptFile, 'wx', 0o600); }
     catch (error) {
@@ -758,7 +815,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       if (!runs.length) {
         const name = await ctx.ui.input('Create a named Pi Ping Pong run', 'ASCII kebab-case, e.g. add-linters');
         if (name === undefined || name.trim() === '') return;
-        return startNamedRun(name.trim(), ctx, project);
+        return startNamedRun(name.trim(), ctx, project, '', false, true);
       }
       const createOption = '＋ Create a new run';
       const labels = runs.map(formatRun);
@@ -767,7 +824,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       if (selected === createOption) {
         const name = await ctx.ui.input('Create a named Pi Ping Pong run', 'ASCII kebab-case, e.g. add-linters');
         if (name === undefined || name.trim() === '') return;
-        return startNamedRun(name.trim(), ctx, project);
+        return startNamedRun(name.trim(), ctx, project, '', false, true);
       }
       const info = runs[labels.indexOf(selected)];
       if (!info) return;
@@ -777,7 +834,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         if (action === 'Launch' && info.dir) return launchConfig(path.join(info.dir, 'config.json'), ctx, { project, name: info.name, dir: info.dir });
       } else if (info.state === 'draft/incomplete') {
         const action = await ctx.ui.select(`Run ${info.name}`, ['Continue preparation', 'Back']);
-        if (action === 'Continue preparation' && info.dir) return sendPreparation(pi, ctx, project, info.name, info.dir, true);
+        if (action === 'Continue preparation' && info.dir) return sendPreparation(pi, ctx, project, info.name, info.dir, true, '', Boolean(info.label));
       }
       return;
     }
@@ -792,46 +849,41 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     if (!project) return;
     return startNamedRun(name, ctx, project, isNameOnly ? '' : taskOrName, !isNameOnly);
   };
-  async function startNamedRun(name: string, ctx: ExtensionCommandContext, project: Project, taskDescription = '', taskGenerated = false) {
+  async function startNamedRun(name: string, ctx: ExtensionCommandContext, project: Project, taskDescription = '', taskGenerated = false, createOnly = false) {
     if (!validRunName(name)) {
       ctx.ui.notify(`Invalid run name. Use lowercase ASCII kebab-case, 1–${maxRunNameLength} characters.`, 'error');
       return;
     }
-    try {
-      if (!ignoredByGit(project, name)) throw new Error(`Private run artifacts are not Git-ignored. Add .pi-ping-pong/ to ${project.root}/.gitignore, verify with git check-ignore, then retry; no run was created.`);
-      assertPrivateDirectoryChain(project.root, runStorage(project), true);
-    } catch (error) { ctx.ui.notify(String(error), 'error'); return; }
-    const dir = path.join(runStorage(project), name);
-    if (fs.existsSync(dir)) {
-      if (taskGenerated) {
-        let info: RunInfo;
-        try { info = listRuns(project).find(run => run.name === name) ?? inspectRun(name, dir); }
-        catch (error) { ctx.ui.notify(String(error), 'error'); return; }
-        ctx.ui.notify(`This task already has a run (${name}); it was not relaunched. ${details(info)}`, 'warning');
+    const current = projectStores(project)[0];
+    const matches = listRuns(project).filter(run => run.name === name);
+    if (matches.length > 1 && !createOnly) {
+      ctx.ui.notify(`More than one run is named ${name}. Use /ppp to select a store, or pass the exact config.json path to launch.\n${matches.map(details).join('\n\n')}`, 'warning');
+      return;
+    }
+    const info = createOnly ? matches.find(run => run.store === current) : matches[0];
+    if (info) {
+      if (createOnly || taskGenerated) {
+        ctx.ui.notify(`This run already exists (${name}); it was not relaunched. ${details(info)}`, 'warning');
         return;
       }
-      let info: RunInfo;
-      try { info = listRuns(project).find(run => run.name === name) ?? inspectRun(name, dir); }
-      catch (error) { ctx.ui.notify(String(error), 'error'); return; }
       ctx.ui.notify(details(info), info.state === 'unknown/malformed' || info.state === 'attention required' ? 'warning' : 'info');
-      if (info.state === 'ready to launch') return launchConfig(path.join(dir, 'config.json'), ctx, { project, name, dir });
-      if (info.state === 'draft/incomplete') {
+      if (info.state === 'ready to launch' && info.dir) return launchConfig(path.join(info.dir, 'config.json'), ctx, { project, name, dir: info.dir });
+      if (info.state === 'draft/incomplete' && info.dir) {
         const action = await ctx.ui.select(`Run ${name} is incomplete`, ['Continue preparation', 'Back']);
-        if (action === 'Continue preparation') return sendPreparation(pi, ctx, project, name, dir, true, taskDescription);
+        if (action === 'Continue preparation') return sendPreparation(pi, ctx, project, name, info.dir, true, taskDescription);
       }
       return;
     }
-    let reserved: string;
-    try { reserved = reserveRun(project, name); }
-    catch (error) {
+    try {
+      const dir = reserveRun(project, name);
+      sendPreparation(pi, ctx, project, name, dir, false, taskDescription, matches.length > 0);
+    } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
         ctx.ui.notify(`Run ${name} was created concurrently. It was not overwritten; inspect it and retry.`, 'warning');
         return;
       }
       ctx.ui.notify(String(error), 'error');
-      return;
     }
-    sendPreparation(pi, ctx, project, name, reserved, false, taskDescription);
   }
 
   // Grant cycles map to native Goal launches; each also adds goal_tokens when that optional cap is configured.
@@ -1006,7 +1058,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       const project = await resolveProject(ctx);
       if (project) {
         try {
-          for (const info of listRuns(project)) byPath.set(info.dir ? canonicalPath(info.dir) : `invalid:${info.name}`, { info });
+          for (const info of listRuns(project)) byPath.set(info.dir ? canonicalPath(info.dir) : `invalid:${info.store}:${info.name}`, { info });
         } catch (error) { byPath.set(`project-error:${project.root}`, { info: { name: 'Project runs', state: 'unknown/malformed', details: String(error) } }); }
       }
     }
@@ -1021,7 +1073,9 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       catch { info = { name: path.basename(binding.root), dir: binding.root, state: 'unknown/malformed' }; }
       byPath.set(canonical, { info, binding });
     }
-    return [...byPath.values()];
+    const runs = [...byPath.values()];
+    labelCollisions(runs.map(row => row.info));
+    return runs;
   }
   const showReviewedStatus = async (args: string, ctx: ExtensionCommandContext) => {
     const flags = args.trim() ? args.trim().split(/\s+/) : [];
@@ -1039,7 +1093,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       }
       const labels = runs.map(({ info, binding }, index) => {
         const view = statusView(info, binding);
-        return `${index + 1}. ${info.name} — ${view.label} · cycles ${view.cycle}`;
+        return `${index + 1}. ${info.label ?? info.name} — ${view.label} · cycles ${view.cycle}`;
       });
       const switchScope = all ? 'Back to runs in this chat' : 'All runs in this project…';
       const title = all ? 'All project and attached runs (read-only)' : runs.length ? 'Runs in this chat, including completed (read-only)' : 'No runs attached to this chat (read-only)';

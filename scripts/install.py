@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install only this skill and its Pi receiver, preserving differing old files."""
 import argparse
+import os
 from pathlib import Path
 import shutil
 from datetime import datetime, timezone
@@ -31,17 +32,22 @@ def main():
         'uv.lock',
         'tsconfig.json',
     }
+    excluded_dirs = {'.git', '.scratch', '__pycache__', 'node_modules', '.venv', '.ruff_cache', '.mypy_cache', '.pytest_cache', 'dist', 'build', 'runs', 'data', '.pi-ping-pong'}
     if source != target:
-        for src in source.rglob('*'):
-            relative = src.relative_to(source)
-            if any(part in {'.git', '__pycache__', 'node_modules', '.venv', '.ruff_cache', '.mypy_cache', '.pytest_cache', 'dist', 'build', 'runs', 'data', '.pi-ping-pong'} for part in relative.parts):
-                continue
-            if src.is_file() and (
-                src.suffix in {'.md', '.py', '.mjs', '.ts', '.yaml'}
-                or src.name in {'.gitignore', 'LICENSE'}
-                or relative.as_posix() in tooling_files | {'scripts/check.sh', '.githooks/pre-commit'}
-            ):
-                copy_file(src, target / relative)
+        for directory, dirs, files in os.walk(source):
+            directory = Path(directory)
+            dirs[:] = [name for name in dirs if name not in excluded_dirs and not (
+                directory.name == '.pi' and name in {'ping-pong', 'reviewed-runs', 'worktrees'}
+            )]
+            for name in files:
+                src = directory / name
+                relative = src.relative_to(source)
+                if not src.is_symlink() and src.is_file() and (
+                    src.suffix in {'.md', '.py', '.mjs', '.ts', '.yaml'}
+                    or src.name in {'.gitignore', 'LICENSE'}
+                    or relative.as_posix() in tooling_files | {'scripts/check.sh', '.githooks/pre-commit'}
+                ):
+                    copy_file(src, target / relative)
     receiver = args.extensions_dir.expanduser().resolve() / 'pi-reviewed.ts'
     copy_file(source / 'extensions/pi-reviewed.ts', receiver)
     print(f'Skill: {target}\nPi receiver: {receiver}\nReload Pi before new launches.')

@@ -574,7 +574,7 @@ class Bridge2Tests(unittest.TestCase):
                 if conflict in {'none', 'quoted'}:
                     self.assertEqual(runner.stat().st_mode & 0o777, 0o700)
                     self.assertEqual(task.stat().st_mode & 0o777, 0o600)
-                    self.assertIn('.pi-ping-pong service changes', session['ralph_snapshot_limitation'])
+                    self.assertIn('.pi/ping-pong and .pi-ping-pong', session['ralph_snapshot_limitation'])
                 elif conflict == 'task':
                     self.assertEqual(task.read_text(), 'Test user native task')
                     self.assertFalse(runner.exists())
@@ -2418,6 +2418,10 @@ class Bridge2Tests(unittest.TestCase):
             probe = git_project(target, {'report.py': 'def f():\n    return 1\n', 'app.config.py': 'K = 1\n', 'clean.py': 'x = 1\n'},
                                 {'report.py': '# TODO(user): Test keep idea A\n# Test second user line\ndef f():\n    return 1\n',
                                  'app.config.py': 'K = 2  # Test private\n', 'notes.md': 'Test untracked user note\n'})
+            for private_dir in ('.pi/ping-pong/manual-e2e', '.pi-ping-pong/runs/Test-legacy'):
+                private = target / private_dir / 'Test-private-report.md'
+                private.parent.mkdir(parents=True)
+                private.write_text('Test private service contents')
             before = probe()
             c['execution_contract']['target'] = str(target)
             p.durable(root / 'config.json', c)
@@ -2427,7 +2431,8 @@ class Bridge2Tests(unittest.TestCase):
             self.assertEqual(probe(), before, 'HEAD, refs and index stay untouched; no lock files')
             record = b.read(root / 'launch-git.json')
             self.assertEqual(set(record['files']), {'report.py', 'notes.md'})
-            self.assertIn('app.config.py', record['omitted'])
+            self.assertEqual(set(record['omitted']), {'app.config.py'}, 'service paths are not launch-evidence rows')
+            self.assertNotIn('Test-private-report.md', json.dumps(b.read(root / 'output-baseline.json')))
             self.assertNotIn('Test private', json.dumps(record))
             request = b.read(root / 'reviews/v2-000001/request.json')
             diff = request['launch_diff']

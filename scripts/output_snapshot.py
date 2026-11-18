@@ -14,6 +14,11 @@ SECONDS = 3
 SKIP_DIRS = {'.git', '.pi-ping-pong', 'node_modules', '.venv', 'venv', '__pycache__', '.cache'}
 
 
+def service_path(path):
+    parts = Path(path).parts
+    return '.pi-ping-pong' in parts or any(pair in {('.pi', 'ping-pong'), ('.pi', 'reviewed-runs')} for pair in zip(parts, parts[1:]))
+
+
 def private_path(path):
     return any(part.startswith('.') or re.search(
         r'(?:credential|secret|password|token|^auth(?:\.|$)|^id_rsa|^id_ed25519|\.(?:pem|key|p12|pfx|keystore)$|(?:^|[._-])(?:config|settings)(?:[._-]|$)|local.*config)',
@@ -53,7 +58,7 @@ def snapshot(c):
             relative = path.relative_to(scope)
             if scope == scopes[0] and path.name in {'cycle-context.json', 'checkpoint.json'}:
                 continue
-            if private_path(relative) or private_path(Path(path.name)) or path.name in SKIP_DIRS or path.is_symlink():
+            if (scope != scopes[0] and service_path(path)) or private_path(relative) or private_path(Path(path.name)) or path.name in SKIP_DIRS or path.is_symlink():
                 limitations.add('Hidden/private paths, symlinks and dependency/cache directories are excluded from discovery.')
                 continue
             try:

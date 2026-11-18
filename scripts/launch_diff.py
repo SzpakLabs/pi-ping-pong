@@ -95,6 +95,8 @@ def record(c):
     untracked = [name.decode('utf-8', 'surrogateescape') for name in checked(top, ['ls-files', '-o', '--exclude-standard', '-z', '--', spec], deadline).split(b'\0') if name]
     used = 0
     for name, binary in [(n, b) for n, b in tracked] + [(n, None) for n in untracked]:
+        if outputs.service_path(top / name):
+            continue
         scoped = Path(name).relative_to(relative) if relative != '.' else Path(name)
         if private(scoped) or private(Path(name).name):
             value['omitted'][name] = 'private/hidden/configuration path not recorded'

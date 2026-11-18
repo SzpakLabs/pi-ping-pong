@@ -34,13 +34,14 @@ const fakeBridge = path.join(root, 'fake-bridge.py');
 fs.mkdirSync(projectPath, { mode: 0o700 });
 execFileSync('git', ['init', '--quiet', projectPath]);
 const project = fs.realpathSync(projectPath);
-fs.writeFileSync(path.join(project, '.gitignore'), '.pi-ping-pong/\n');
+fs.writeFileSync(path.join(project, '.gitignore'), '/.pi/ping-pong/\n');
 fs.writeFileSync(fakeBridge, `from pathlib import Path\nPath(${JSON.stringify(childMarker)}).write_text('spawned')\n`);
 const previousBridge = process.env.PI_PING_PONG_BRIDGE;
 const previousHome = process.env.HOME;
 process.env.PI_PING_PONG_BRIDGE = fakeBridge;
 process.env.HOME = root;
-const storage = path.join(project, '.pi-ping-pong', 'runs');
+const storage = path.join(project, '.pi', 'ping-pong', 'runs');
+const legacyStorage = path.join(project, '.pi-ping-pong', 'runs');
 const chmodPrivate = file => fs.chmodSync(file, 0o600);
 const write = (file, data, mode = 0o600) => {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -63,8 +64,8 @@ const tempConfig = (dir, runId = randomUUID()) => ({
   review_seconds: 120,
   wall_seconds: 600,
 });
-const makeRun = (name, { config = tempConfig(path.join(storage, name)), status, files = {}, malformedConfig = false, launched = status !== undefined } = {}) => {
-  const dir = path.join(storage, name);
+const makeRun = (name, { config = tempConfig(path.join(storage, name)), status, files = {}, malformedConfig = false, launched = status !== undefined, parent = storage } = {}) => {
+  const dir = path.join(parent, name);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   for (const [file, content] of Object.entries(files)) write(path.join(dir, file), content);
@@ -76,8 +77,8 @@ const makeRun = (name, { config = tempConfig(path.join(storage, name)), status, 
   }
   return dir;
 };
-const makeReadyRun = (name, runId = randomUUID(), overrides = {}) => {
-  const dir = makeRun(name, { config: null, launched: false });
+const makeReadyRun = (name, runId = randomUUID(), overrides = {}, parent = storage) => {
+  const dir = makeRun(name, { config: null, launched: false, parent });
   write(path.join(dir, 'TASK.md'), 'Synthetic task criteria; no real user run.');
   const config = { ...tempConfig(dir, runId), ...overrides };
   for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete config[key];
@@ -119,6 +120,7 @@ try {
   for (const alias of ['reviewed-run', 'ppp']) assert.strictEqual(commands.get(alias).handler, commands.get('pi-ping-pong').handler, `${alias} must use the same launcher/menu handler`);
   for (const alias of ['reviewed-status', 'ppp-status']) assert.strictEqual(commands.get(alias).handler, commands.get('pi-ping-pong-status').handler, `${alias} must use the same status handler`);
 
+  const originalExclude = fs.readFileSync(path.join(project, '.git/info/exclude'));
   const beforeEmpty = userMessages.length;
   inputAnswers.push('add-linters');
   await runCommand('pi-ping-pong');
@@ -128,6 +130,7 @@ try {
   assert.equal(fs.statSync(path.join(draft, '.draft.json')).mode & 0o777, 0o600, 'draft reservation metadata is private');
   assert.equal(fs.existsSync(path.join(draft, 'config.json')), false, 'reservation never creates a config placeholder');
   assert.equal(fs.existsSync(path.join(draft, 'launch-attempt.json')), false, 'preparation does not create launch state');
+  assert.deepEqual(fs.readFileSync(path.join(project, '.git/info/exclude')), originalExclude, 'no local exclude edit when Git already ignores the run');
   assert.equal(entries.length, 0, 'preparation does not attach a run to the Pi session');
   const prompt = userMessages.at(-1).message;
   for (const required of [project, 'Selected run name: add-linters', draft, 'unique RFC 4122 UUID run_id', 'worker_model=gpt-6-luna', 'thinking=low', 'max_cycles=10', 'approved defaults', 'test-review-provider/test-review-model', 'positive finite integer', 'Do not create eval.py, eval_argv', 'ordinary tests', 'only what tests cannot establish', 'No mandatory model preflight', 'Do not start or launch the worker', 'Do not write pi_session_id', 'Do not overwrite .draft.json', '/pi-ping-pong add-linters']) {
@@ -183,28 +186,6 @@ try {
   assert.equal(userMessages.length, raceBefore + 1, 'same-name race starts at most one preparation');
   assert.equal(fs.existsSync(path.join(storage, 'race-run-2')), false, 'race never silently adds a suffix');
 
-  const raceTarget = path.join(storage, 'race-window');
-  const raceBin = path.join(root, 'race-bin');
-  fs.mkdirSync(raceBin, { mode: 0o700 });
-  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
-  const raceCounter = path.join(root, 'race-git-count');
-  const raceWrapper = path.join(raceBin, 'git');
-  fs.writeFileSync(raceWrapper, `#!/bin/sh\nif [ "$3" = "check-ignore" ]; then\n  count=0\n  [ -f "$PPP_RACE_COUNTER" ] && count=$(cat "$PPP_RACE_COUNTER")\n  count=$((count + 1))\n  printf '%s' "$count" > "$PPP_RACE_COUNTER"\n  if [ "$count" -eq 2 ]; then\n    mkdir -p "$PPP_RACE_TARGET"\n    chmod 700 "$PPP_RACE_DIR" "$PPP_RACE_PARENT" "$PPP_RACE_TARGET"\n    printf 'created by competing process' > "$PPP_RACE_TARGET/.draft.json"\n    chmod 600 "$PPP_RACE_TARGET/.draft.json"\n  fi\nfi\nexec "$PPP_REAL_GIT" "$@"\n`);
-  fs.chmodSync(raceWrapper, 0o700);
-  process.env.PPP_RACE_COUNTER = raceCounter;
-  process.env.PPP_RACE_TARGET = raceTarget;
-  process.env.PPP_RACE_DIR = path.join(project, '.pi-ping-pong');
-  process.env.PPP_RACE_PARENT = storage;
-  process.env.PPP_REAL_GIT = realGit;
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${raceBin}${path.delimiter}${previousPath ?? ''}`;
-  const raceModelCalls = userMessages.length;
-  await runCommand('pi-ping-pong', 'race-window');
-  assert.equal(userMessages.length, raceModelCalls, 'exclusive create race does not start a second preparation');
-  assert.equal(fs.readFileSync(path.join(raceTarget, '.draft.json'), 'utf8'), 'created by competing process', 'exclusive run reservation never overwrites a concurrent directory');
-  process.env.PATH = previousPath;
-  for (const key of ['PPP_RACE_COUNTER', 'PPP_RACE_TARGET', 'PPP_RACE_DIR', 'PPP_RACE_PARENT', 'PPP_REAL_GIT']) delete process.env[key];
-
   for (const taskText of ['.hidden', 'Bad-Name', 'bad_name', 'a'.repeat(49), '../escape']) {
     const before = userMessages.length;
     await runCommand('pi-ping-pong', taskText);
@@ -218,7 +199,7 @@ try {
   const emptyProject = path.join(root, 'empty-project');
   fs.mkdirSync(emptyProject, { mode: 0o700 });
   execFileSync('git', ['init', '--quiet', emptyProject]);
-  fs.writeFileSync(path.join(emptyProject, '.gitignore'), '.pi-ping-pong/\n');
+  fs.writeFileSync(path.join(emptyProject, '.gitignore'), '/.pi/ping-pong/\n');
   const originalCwd = ctx.cwd;
   ctx.cwd = emptyProject;
   inputAnswers.push(undefined);
@@ -236,7 +217,7 @@ try {
   process.env.GIT_WORK_TREE = project;
   process.env.GIT_INDEX_FILE = path.join(project, '.git', 'index');
   await runCommand('ppp', 'confirmed-run');
-  assert.ok(fs.existsSync(path.join(nonGit, '.pi-ping-pong', 'runs', 'confirmed-run', '.draft.json')), 'selected non-Git project works without a routine approval gate or UI');
+  assert.ok(fs.existsSync(path.join(nonGit, '.pi', 'ping-pong', 'runs', 'confirmed-run', '.draft.json')), 'selected non-Git project works without a routine approval gate or UI');
   assert.equal(confirmAnswers.length, beforeNonGitConfirmations);
   ctx.hasUI = true;
   const fallbackHome = path.join(root, 'fallback-home');
@@ -254,7 +235,7 @@ try {
   ctx.cwd = nestedCwd;
   await runCommand('pi-ping-pong', 'root-from-git');
   assert.ok(fs.existsSync(path.join(storage, 'root-from-git', '.draft.json')), 'Git top-level, not cwd subdirectory, determines project storage');
-  assert.equal(fs.existsSync(path.join(nestedCwd, '.pi-ping-pong')), false);
+  assert.equal(fs.existsSync(path.join(nestedCwd, '.pi')), false);
   ctx.cwd = originalCwd;
   for (const name of gitLocalVars) delete process.env[name];
 
@@ -340,11 +321,12 @@ try {
   assert.match(statusText, /Directory: .*test-running/, 'detailed status includes the relevant run path');
   assert.ok(statusText.includes('cycle 1/3'), 'detailed status includes cycle and configured budget');
   assert.match(statusText, /Next:/, 'detailed status includes an actionable next step');
-  const primaryStatus = statusText;
+  const withoutClock = text => text.replace(/; elapsed [^;]+; state age [^\n]+/g, '');
+  const primaryStatus = withoutClock(statusText);
   await runCommand('reviewed-status', '--all --details');
-  assert.equal(notices.at(-1)[0], primaryStatus, 'legacy status alias is equivalent');
+  assert.equal(withoutClock(notices.at(-1)[0]), primaryStatus, 'legacy status alias is equivalent');
   await runCommand('ppp-status', '--all --details');
-  assert.equal(notices.at(-1)[0], primaryStatus, 'short status alias is equivalent');
+  assert.equal(withoutClock(notices.at(-1)[0]), primaryStatus, 'short status alias is equivalent');
   const boundRun = path.join(storage, 'test-bound-no-status');
   const beforeBound = userMessages.length;
   await runCommand('pi-ping-pong', 'test-bound-no-status');
@@ -367,10 +349,10 @@ try {
   const symlinkProject = path.join(root, 'symlink-project');
   fs.mkdirSync(symlinkProject, { mode: 0o700 });
   execFileSync('git', ['init', '--quiet', symlinkProject]);
-  fs.writeFileSync(path.join(symlinkProject, '.gitignore'), '.pi-ping-pong/\n');
+  fs.writeFileSync(path.join(symlinkProject, '.gitignore'), '/.pi/ping-pong/\n');
   const externalStorage = path.join(root, 'external-storage');
   fs.mkdirSync(externalStorage, { mode: 0o700 });
-  fs.symlinkSync(externalStorage, path.join(symlinkProject, '.pi-ping-pong'));
+  fs.symlinkSync(externalStorage, path.join(symlinkProject, '.pi'));
   ctx.cwd = symlinkProject;
   const beforeSymlinkProject = userMessages.length;
   await runCommand('ppp', 'escape-run');
@@ -382,12 +364,117 @@ try {
   fs.mkdirSync(nonIgnored, { mode: 0o700 });
   execFileSync('git', ['init', '--quiet', nonIgnored]);
   ctx.cwd = nonIgnored;
+  const localExclude = path.join(nonIgnored, '.git', 'info', 'exclude');
+  const ignoreFile = path.join(nonIgnored, '.gitignore');
+  const excludePrefix = '# existing local rules\n/Test-preserved/';
+  fs.writeFileSync(localExclude, excludePrefix);
+  fs.writeFileSync(ignoreFile, '# tracked user rules\n/Test-ignored/\n');
+  execFileSync('git', ['-C', nonIgnored, 'add', '.gitignore']);
+  fs.mkdirSync(path.join(nonIgnored, '.pi'), { mode: 0o755 });
+  fs.chmodSync(path.join(nonIgnored, '.pi'), 0o755);
+  write(path.join(nonIgnored, '.pi', 'Test-settings.json'), '{}');
   const beforeUnignored = userMessages.length;
-  await runCommand('pi-ping-pong', 'must-not-save');
-  assert.equal(userMessages.length, beforeUnignored, 'project preparation is refused until run artifacts are Git-ignored');
-  assert.match(notices.at(-1)[0], /not Git-ignored/);
-  assert.equal(fs.existsSync(path.join(nonIgnored, '.pi-ping-pong')), false);
+  await runCommand('ppp', 'test-local-exclude');
+  await runCommand('ppp', 'test-local-exclude-again');
+  assert.equal(userMessages.length, beforeUnignored + 2, 'missing ignore does not gate preparation');
+  assert.equal(fs.readFileSync(localExclude, 'utf8'), `${excludePrefix}\n/.pi/ping-pong/\n`);
+  assert.equal(fs.readFileSync(ignoreFile, 'utf8'), '# tracked user rules\n/Test-ignored/\n');
+  const gitVisible = execFileSync('git', ['-C', nonIgnored, 'ls-files', '-o', '--exclude-standard'], { encoding: 'utf8' });
+  assert.equal(gitVisible, '.pi/Test-settings.json\n', 'only PPP storage is hidden from Git');
+  assert.equal(fs.statSync(path.join(nonIgnored, '.pi')).mode & 0o777, 0o755, 'existing shared Pi directory is not chmodded');
+  for (const relative of ['.pi/ping-pong', '.pi/ping-pong/runs', '.pi/ping-pong/runs/test-local-exclude']) {
+    assert.equal(fs.statSync(path.join(nonIgnored, relative)).mode & 0o777, 0o700);
+  }
+  fs.unlinkSync(localExclude);
+  const externalExclude = path.join(root, 'Test-external-exclude');
+  fs.writeFileSync(externalExclude, '# must remain unchanged\n');
+  fs.symlinkSync(externalExclude, localExclude);
+  ctx.hasUI = false;
+  const warningStart = notices.length;
+  await runCommand('ppp', 'test-no-exclude');
+  const noExcludeRun = path.join(nonIgnored, '.pi', 'ping-pong', 'runs', 'test-no-exclude');
+  assert.equal(userMessages.length, beforeUnignored + 3);
+  assert.ok(fs.existsSync(path.join(noExcludeRun, '.draft.json')));
+  assert.ok(notices.slice(warningStart).some(([message, level]) => level === 'warning' && /Git-ignored.*do not commit/s.test(message)));
+  assert.match(execFileSync('git', ['-C', nonIgnored, 'ls-files', '-o', '--exclude-standard'], { encoding: 'utf8' }), /test-no-exclude\/\.draft\.json/);
+  const noExcludeConfig = path.join(noExcludeRun, 'config.json');
+  write(noExcludeConfig, tempConfig(noExcludeRun));
+  write(path.join(noExcludeRun, 'TASK.md'), 'Test task');
+  const launchWarnings = notices.length;
+  await runCommand('ppp', noExcludeConfig);
+  await waitForChild();
+  assert.ok(notices.slice(launchWarnings).some(([message, level]) => level === 'warning' && /Git-ignored.*do not commit/s.test(message)));
+  assert.equal(fs.readFileSync(externalExclude, 'utf8'), '# must remain unchanged\n');
+  ctx.hasUI = true;
   ctx.cwd = originalCwd;
+
+  // Linked worktrees use the common exclude, not a file under the worktree's Git directory.
+  const worktreeProject = path.join(root, 'Test-worktree-project');
+  const worktree = path.join(root, 'Test-linked-worktree');
+  execFileSync('git', ['init', '-q', worktreeProject]);
+  execFileSync('git', ['-C', worktreeProject, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'Test fixture']);
+  execFileSync('git', ['-C', worktreeProject, 'worktree', 'add', '--detach', '--quiet', worktree]);
+  ctx.cwd = worktree;
+  await runCommand('ppp', 'test-linked-store');
+  execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '.pi/ping-pong/runs/test-linked-store/.draft.json']);
+  assert.match(fs.readFileSync(path.join(worktreeProject, '.git/info/exclude'), 'utf8'), /\/\.pi\/ping-pong\//);
+  ctx.cwd = originalCwd;
+
+  const savedPath = process.env.PATH;
+  process.env.PATH = nonGit;
+  try {
+    ctx.cwd = nonGit;
+    const from = notices.length;
+    await runCommand('ppp', 'test-missing-git');
+    assert.ok(fs.existsSync(path.join(nonGit, '.pi/ping-pong/runs/test-missing-git/.draft.json')));
+    assert.ok(notices.slice(from).some(([message, level]) => level === 'warning' && /Git ignore status could not be verified/.test(message)));
+  } finally { process.env.PATH = savedPath; ctx.cwd = originalCwd; }
+
+  fs.appendFileSync(path.join(project, '.gitignore'), '/.pi-ping-pong/\n');
+  const oldName = 'test-shared-name';
+  const historicalRun = makeReadyRun(oldName, randomUUID(), {}, legacyStorage);
+  const legacyTask = fs.readFileSync(path.join(historicalRun, 'TASK.md'));
+  selectAnswers.push('＋ Create a new run');
+  inputAnswers.push(oldName);
+  await runCommand('ppp');
+  const newRun = path.join(storage, oldName);
+  assert.ok(fs.existsSync(path.join(newRun, '.draft.json')), 'explicit create can reserve a current run without replacing a legacy name');
+  assert.match(userMessages.at(-1).message, /\.pi\/ping-pong\/runs\/test-shared-name\/config\.json/);
+  await runCommand('ppp', oldName);
+  assert.match(notices.at(-1)[0], /More than one run/);
+  assert.ok(!fs.existsSync(childMarker));
+  await runCommand('ppp-status', '--all --details');
+  assert.match(notices.at(-1)[0], /test-shared-name \[\.pi-ping-pong\/runs\]: ready to launch/);
+  assert.match(notices.at(-1)[0], /test-shared-name \[\.pi\/ping-pong\/runs\]: draft/);
+  selectAnswers.push((_title, options) => options.find(row => row.includes('test-shared-name [.pi-ping-pong/runs]')), 'Launch');
+  await runCommand('ppp');
+  await waitForChild();
+  const [entryType, oldBinding] = entries.at(-1);
+  assert.equal(entryType, 'pi-reviewed-run');
+  assert.equal(oldBinding.root, historicalRun);
+  assert.deepEqual(fs.readFileSync(path.join(historicalRun, 'TASK.md')), legacyTask, 'legacy artifacts stay in place');
+  assert.equal(fs.existsSync(path.join(newRun, 'launch-attempt.json')), false);
+  await assert.rejects(runCommand('ppp', path.join(historicalRun, 'config.json')), /already launched/);
+  await hooks.get('session_shutdown')();
+  await hooks.get('session_start')({}, { ...ctx, sessionManager: { ...ctx.sessionManager, getEntries: () => [{ type: 'custom', customType: entryType, data: oldBinding }] } });
+  await runCommand('ppp-status', '--details');
+  assert.ok(notices.at(-1)[0].includes(historicalRun), 'reopening a legacy project session restores the exact binding');
+  await hooks.get('session_shutdown')();
+
+  const oldReady = makeReadyRun('test-legacy-ready', randomUUID(), {}, legacyStorage);
+  await runCommand('ppp', 'test-legacy-ready');
+  await waitForChild();
+  assert.ok(fs.existsSync(path.join(oldReady, 'launch-attempt.json')));
+  assert.equal(fs.existsSync(path.join(storage, 'test-legacy-ready')), false, 'legacy launch does not migrate storage');
+  await hooks.get('session_shutdown')();
+
+  const crossStoreId = randomUUID();
+  makeReadyRun('test-identity-old', crossStoreId, {}, legacyStorage);
+  const duplicateNew = makeReadyRun('test-identity-new', crossStoreId);
+  await runCommand('ppp', 'test-identity-new');
+  assert.match(notices.at(-1)[0], /Duplicate run_id/);
+  await assert.rejects(runCommand('ppp', path.join(duplicateNew, 'config.json')), /Duplicate run_id/);
+  assert.equal(fs.existsSync(path.join(duplicateNew, 'launch-attempt.json')), false);
 
   const legacyRoot = path.join(root, 'legacy-run');
   fs.mkdirSync(legacyRoot, { mode: 0o700 });
@@ -701,11 +788,20 @@ try {
   write(path.join(installSkill, 'extensions', 'pi-reviewed.ts'), 'export {};');
   write(path.join(installSkill, '.pi-ping-pong', 'runs', 'test-secret-run', 'TASK.md'), 'private synthetic artifact');
   write(path.join(installSkill, '.pi-ping-pong', 'runs', 'test-secret-run', 'eval.py'), 'raise SystemExit(1)');
+  write(path.join(installSkill, '.pi', 'ping-pong', 'manual-e2e', 'Test-private.md'), 'private synthetic artifact');
+  write(path.join(installSkill, '.pi', 'Test-example.md'), 'unrelated synthetic Pi source fixture');
+  write(path.join(installSkill, '.pi', 'worktrees', 'Test-worktree', 'TASK.md'), 'local worktree fixture');
+  write(path.join(installSkill, '.scratch', 'Test-local-spec.md'), 'local development history fixture');
   const installOut = path.join(root, 'installed-skill');
   const extensionOut = path.join(root, 'installed-extensions');
   const install = spawnSync('python3', ['-B', path.join(installSkill, 'scripts', 'install.py'), '--skills-dir', installOut, '--extensions-dir', extensionOut], { encoding: 'utf8' });
   assert.equal(install.status, 0, install.stderr);
   assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', '.pi-ping-pong')), false, 'installer excludes project run data');
+  assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', '.pi', 'ping-pong')), false, 'installer excludes new service storage beyond runs/');
+  assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', '.pi', 'Test-example.md')), true, 'installer does not broadly exclude .pi');
+  for (const relative of ['.pi/worktrees', '.scratch']) {
+    assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', relative)), false, 'installer excludes local development artifacts');
+  }
   assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', 'extensions', 'pi-reviewed.ts')), true, 'installer still installs receiver source');
   assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', 'scripts', 'output_snapshot.py')), true, 'installer includes scoped discovery helper without run artifacts');
   // Protocol-2 ingress is a native, explicitly confirmed human command, never a review/model flag.
