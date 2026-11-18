@@ -1,5 +1,17 @@
 # Maintaining Pi Ping Pong
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked as local Markdown under `.scratch/`.
+See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This is a single-context repository.
+See `docs/agents/domain.md`.
+
 This repository contains one shared bridge for Goal and Ralph, plus a Pi queue receiver. Keep mode differences in the existing implementation; do not fork the protocol per launcher.
 
 ## Foundational product contract

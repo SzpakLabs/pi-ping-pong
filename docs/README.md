@@ -11,6 +11,10 @@
 - [Manual E2E](manual-e2e.md) and [private report template](manual-e2e-report-template.md): separate user-operated validation, not an acceptance claim.
 - [Development checks](GUIDE.md#development-checks) and [maintenance instructions](../AGENTS.md).
 
+## Agent configuration
+
+- [Local issue tracker](agents/issue-tracker.md) and [domain documentation rules](agents/domain.md).
+
 ## Development history
 
 These notes document earlier requirements, prototypes, and verification. Some use the removed evaluator lifecycle or propose future work that is not implemented. They do not override the current contract or establish live acceptance of this checkout.
