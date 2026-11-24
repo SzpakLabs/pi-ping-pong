@@ -29,7 +29,7 @@ Review has its own finite deadline. Corrections use remaining allowance rather t
 
 ## Get started
 
-1. From a checkout, run `python3 scripts/install.py` to install the skill and Pi receiver. Install Pi, model access, and any extension required by the chosen mode separately. See [requirements and installation](docs/GUIDE.md#requirements).
+1. Install with `pi install git:github.com/SzpakLabs/pi-ping-pong`. If you used the old copy installer, [disable the copied receiver first](docs/GUIDE.md#migrate-from-the-copy-installer). See the [guide](docs/GUIDE.md#install) for prerequisites, updates, and the Codex skill.
 2. Open Pi in the project you want the Worker to edit. Run `/reload` if you just installed the receiver. New runs use `.pi/ping-pong/runs/`; [Git exclusion is best effort](docs/project-workspace.md#private-run-storage), not a preparation or launch requirement.
 3. Describe the task, allowed paths, and how you'd judge the result. Run `/ppp <name>` with an unused lowercase kebab-case name. Review the generated `TASK.md`, `config.json`, models, and limits. Preparation does not start the Worker.
 4. Run `/ppp <name>` again when the draft is ready and you want to launch. Use `/ppp-status` to inspect it. With headless review, the launching chat reports progress and collects confirmed human responses through `/ppp-respond`; a separate Pi session reviews the result.

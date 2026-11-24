@@ -11,13 +11,49 @@
 
 ## Install
 
-From a local checkout:
+If you used `scripts/install.py` before, [disable that receiver first](#migrate-from-the-copy-installer). Install PPP with Pi:
 
 ```sh
-python3 scripts/install.py
+pi install git:github.com/SzpakLabs/pi-ping-pong
 ```
 
-This copies the skill to `~/.agents/skills/pi-ping-pong` and the receiver to `~/.pi/agent/extensions/pi-reviewed.ts`, backing up differing existing files. It does not install Pi, vendor extensions, credentials, or Git hooks. Run `/reload` in Pi after installation or an update; do not load a duplicate receiver.
+Open a new Pi session or run `/reload`. To check the installation without starting work, look for `/skill:pi-ping-pong` in command completion and run `/ppp-status`. The package includes the receiver, skill, and Python bridge. It does not install Python, model credentials, Goal, or Ralph.
+
+This Git command follows the repository's default branch; it installs the package only once that branch contains the Pi manifest. To try an unpublished checkout instead, run `pi install /absolute/path/to/pi-ping-pong`. Pi loads that checkout in place; update it with Git, not `pi update`. Install only one source for PPP at a time.
+
+### Update or remove
+
+```sh
+pi update git:github.com/SzpakLabs/pi-ping-pong
+# Or update all installed Pi packages:
+pi update --extensions
+```
+
+Bare `pi update` updates Pi itself, not PPP. A Git tag or commit pin stays fixed. Update between runs: Pi replaces the Git package files in place, and an existing bridge can still need its companion scripts. After updating, reopen Pi or `/reload` before using PPP again. `pi remove git:github.com/SzpakLabs/pi-ping-pong` unregisters the package; project run records and any independent Codex skill copy remain in place.
+
+### Migrate from the copy installer
+
+1. Between runs, move the old receiver out of Pi's discovery. For the default installer path, keep a local backup:
+
+   ```sh
+   mv -i ~/.pi/agent/extensions/pi-reviewed.ts ~/.pi/agent/extensions/pi-reviewed.ts.disabled
+   ```
+
+   If you used a custom location or explicitly configured the old file, disable that entry in `pi config` instead. Do not change run directories or session records.
+2. Install the package, then `/reload` or restart Pi. Don't rerun the legacy installer without `--skill-only`: doing so recreates the copied receiver and causes duplicate commands and subscriptions.
+3. If you keep `~/.agents/skills/pi-ping-pong` for Codex, use `pi config` to disable **only** that standalone skill in Pi and leave the package skill enabled. On Pi versions with exact resource exclusions, the equivalent is appending `"-~/.agents/skills/pi-ping-pong/SKILL.md"` to the existing `skills` array in Pi's user settings. If you don't need the standalone skill, you can move it outside the discovered skills directory instead.
+
+`PI_PING_PONG_BRIDGE` still overrides bridge selection for both launch and wake. Without it, the receiver prefers the bridge alongside its package. A standalone receiver copied by the legacy installer still uses the bridge under `~/.agents/skills/pi-ping-pong`.
+
+### Install the Codex skill
+
+From an up-to-date checkout:
+
+```sh
+python3 scripts/install.py --skill-only
+```
+
+This installs or updates `~/.agents/skills/pi-ping-pong`, backing up differing files, without copying a Pi receiver. Installing or updating the Pi package does not update this separate copy. For a legacy copy-only Pi installation, `python3 scripts/install.py` without this flag still installs both the skill and receiver; use that route **instead of**, not alongside, the Pi package.
 
 ## Prepare and launch
 
@@ -44,7 +80,7 @@ Use status and saved records to diagnose an interruption. `python3 scripts/bridg
 
 ## Quick start: reviewer in Codex
 
-This optional route uses `review_transport=codex` with the exact existing `thread_id` and configured review model. It does not start a headless Codex Reviewer or a Codex Worker. The host's `codex queue` command must be available and authorized for that chat; check `codex queue --help` on the host. Do not use `codex exec resume` as a second writer to the same chat.
+This optional route uses `review_transport=codex` with the exact existing `thread_id` and configured review model. [Install the standalone skill](#install-the-codex-skill) if you want Codex to discover it. This route does not start a headless Codex Reviewer or a Codex Worker. The host's `codex queue` command must be available and authorized for that chat; check `codex queue --help` on the host. Do not use `codex exec resume` as a second writer to the same chat.
 
 Prepare a private `TASK.md` and protocol 2 / schema 1 `config.json`, following the [run contract](../references/reviewed-runs.md). Review both before starting the bridge from the checkout (replace the config path):
 
