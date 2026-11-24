@@ -457,7 +457,7 @@ function formatRun(info: RunInfo) {
 function statusView(info: RunInfo, binding?: Binding) {
   const root = info.dir ?? binding?.root;
   const config = info.config;
-  let state: { run_id?: unknown; status?: unknown; outcome?: unknown; phase?: unknown; cycle?: unknown; max_cycles?: unknown; started_at?: unknown; updated_at?: unknown; reason?: unknown; main_remaining?: unknown; worker_tokens?: unknown; goal_usage_status?: unknown; blockers?: { id: string; status: string; escalation: string; needed: string }[] } | undefined;
+  let state: { run_id?: unknown; status?: unknown; outcome?: unknown; phase?: unknown; cycle?: unknown; max_cycles?: unknown; started_at?: unknown; updated_at?: unknown; reason?: unknown; main_remaining?: unknown; worker_tokens?: unknown; worker_tokens_status?: unknown; goal_usage_status?: unknown; blockers?: { id: string; status: string; escalation: string; needed: string }[] } | undefined;
   const validatedRunId = safeRunId(config?.run_id) && (!binding || (safeRunId(binding.runId) && binding.runId === config.run_id));
   const validatedInfoState = ['running', 'starting', 'waiting review', 'waiting human', 'waiting resource', 'waiting event', 'completed', 'stopped', 'attention required'].includes(info.state);
   const invalidLifecycleIdentity = validatedInfoState && (!validatedRunId || (binding !== undefined && binding.runId !== config?.run_id));
@@ -488,22 +488,25 @@ function statusView(info: RunInfo, binding?: Binding) {
   const next = label === 'completed' ? 'No further action.' : label === 'stopped' && state?.outcome === 'delivered_unverified' ? 'Result delivered, not verified (not acceptance); no further stage starts. Check the unverified criteria yourself if needed.' : label === 'attention required' || label === 'unknown/malformed' ? 'Inspect saved state and launcher.log; do not relaunch automatically.' : label === 'waiting resource' || label === 'waiting event' ? 'No Worker is running; awaiting the recorded resource/event or scheduled check, not a review reply.' : label === 'waiting human' ? config?.review_execution === 'headless' ? 'Reply in Chat A using /ppp-respond; choose the run and request, then confirm your instruction. No JSON is needed.' : 'Provide the requested input in the reviewer session.' : label === 'waiting review' ? config?.review_execution === 'headless' ? 'Independent Reviewer is running; no human reply is needed.' : 'Review the pending checkpoint.' : label === 'ready to launch' ? 'Launch explicitly when ready.' : 'Monitor local status; no action is required.';
   const goalUsageUnknown = config?.mode === 'goal' && state?.goal_usage_status !== 'known';
   const mainRemaining = goalUsageUnknown ? 'unknown (actual Goal usage unavailable)' : displayValue(state?.main_remaining);
-  const goalUsage = config?.mode === 'goal' ? `Goal tokens: ${displayValue(state?.worker_tokens)} recorded${goalUsageUnknown ? '; actual usage unknown (recorded value is a lower bound)' : ''}` : '';
-  return { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, goalUsage };
+  const tokenUsage = config?.mode === 'goal' ? `Goal tokens: ${displayValue(state?.worker_tokens)} recorded${goalUsageUnknown ? '; actual usage unknown (recorded value is a lower bound)' : ''}` : config?.mode === 'ralph'
+    ? state?.worker_tokens_status === 'partial' && Number.isSafeInteger(state.worker_tokens) && Number(state.worker_tokens) >= 0
+      ? `Ralph Worker tokens: ${state.worker_tokens} observed (partial, lower bound)` : 'Ralph Worker tokens: not measured'
+    : '';
+  return { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, tokenUsage };
 }
 function compactStatus(info: RunInfo, binding?: Binding) {
   const view = statusView(info, binding);
   const detail = view.reason || (['unknown/malformed', 'draft/incomplete', 'attention required'].includes(view.label) ? info.details : '');
   return [`${info.label ?? info.name} — ${view.label}`, `Cycles: ${view.cycle}${view.config?.protocol_version === 2 ? ` · Main remaining: ${view.mainRemaining}` : `/${view.maximum}`}`,
-    ...(view.goalUsage ? [view.goalUsage] : []), ...(detail ? [detail] : []), `Next: ${view.next}`].join('\n');
+    ...(view.tokenUsage ? [view.tokenUsage] : []), ...(detail ? [detail] : []), `Next: ${view.next}`].join('\n');
 }
 function detailedStatus(info: RunInfo, binding?: Binding) {
-  const { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, goalUsage } = statusView(info, binding);
+  const { root, config, state, label, phase, cycle, maximum, elapsed, age, reason, next, mainRemaining, tokenUsage } = statusView(info, binding);
   return [
     `${info.label ?? info.name}: ${label} (phase ${phase})`,
     `Mode: ${info.mode ?? 'unavailable'}; cycle ${cycle}/${maximum}; elapsed ${elapsed}; state age ${age}`,
     ...(config?.protocol_version === 2 ? [`Protocol: 2/schema 1; cumulative ledger: ${root ? path.join(root, 'execution-state.json') : 'unavailable'}`, `Main remaining: ${mainRemaining}; closure uses separate initial authority. Initial max_cycles is not a cumulative total.`, ...(Array.isArray(state?.blockers) ? state.blockers.map(b => `${displayValue(b.id)}: ${displayValue(b.status)} / ${displayValue(b.escalation)} — ${displayValue(b.needed)}`) : []), 'Human input: /ppp-respond opens a confirmed action menu; questions are not authorizations. Advanced: /ppp-respond <run-id> <JSON>.'] : []),
-    ...(goalUsage ? [goalUsage] : []),
+    ...(tokenUsage ? [tokenUsage] : []),
     `Worker: ${info.worker ?? 'unavailable'}`,
     `Reviewer: ${info.reviewer ?? 'unavailable'}`,
     `Directory: ${root ?? 'unavailable'}`,

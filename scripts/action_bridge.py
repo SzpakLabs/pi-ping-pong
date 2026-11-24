@@ -10,6 +10,7 @@ from pathlib import Path
 import queue
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -152,6 +153,53 @@ def usage_total(rows):
     if not rows or all(value == 'not_measured' for value in statuses):
         return None, 'not_measured'
     return sum(row.get('tokens') or 0 for row in rows), 'known' if all(value == 'known' for value in statuses) else 'partial'
+
+
+def ralph_observed_tokens(root, session):
+    """Read one durable host high-water; never add replayed snapshots to execution state."""
+    dispatch, token, host = (session.get(key) for key in ('ralph_usage_dispatch', 'ralph_loop_token', 'pid'))
+    if not dispatch or not token or type(host) is not int or host <= 1:
+        return None
+    try:
+        directory = Path(session['ralph_guards'])
+        p.require(directory.resolve().is_relative_to(root.resolve()) and not directory.is_symlink() and directory.stat().st_mode & 0o077 == 0,
+                  'Ralph usage directory must be private and run-owned')
+        fd = os.open(directory / 'usage.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            metadata = os.fstat(stream.fileno())
+            p.require(stat.S_ISREG(metadata.st_mode) and metadata.st_mode & 0o077 == 0, 'Ralph usage record must be private and regular')
+            payload = stream.read(4097)
+        if len(payload) > 4096:
+            return None
+        record = json.loads(payload)
+        if (record.get('dispatch') == dispatch and record.get('loop_token') == token and
+                type(record.get('host')) is int and record['host'] == host and
+                type(record.get('tokens')) is int and 0 <= record['tokens'] <= 2**53 - 1):
+            return record['tokens']
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        pass  # Report-only observations cannot interfere with execution or review.
+    return None
+
+
+def ralph_token_projection(root, sessions):
+    """Each dispatch contributes once, attributed to its anchor (not every mixed-scope action)."""
+    by_action = {session['action_id']: None for session in sessions}
+    seen = set()
+    for session in sessions:
+        dispatch = session.get('ralph_usage_dispatch')
+        if not dispatch or dispatch in seen:
+            continue
+        seen.add(dispatch)
+        tokens = ralph_observed_tokens(root, session)
+        if tokens is not None:
+            aid = session['action_id']
+            by_action[aid] = (by_action[aid] or 0) + tokens
+    totals = [tokens for tokens in by_action.values() if tokens is not None]
+    return dict(worker_tokens=sum(totals) if totals else None,
+                worker_tokens_status='partial' if totals else 'not_measured',
+                worker_tokens_by_action=by_action,
+                worker_tokens_reason=('Observed Ralph RPC assistant usage is a lower bound; full coverage is not established.' if totals
+                                      else 'No attributable Ralph RPC assistant usage was observed (native children use --no-session).'))
 
 
 def process_result(proc):
@@ -310,12 +358,12 @@ class ActionBridge(Bridge):
                 reviewers.append({})
         self.state['reviewer_tokens'], self.state['reviewer_tokens_status'] = usage_total(reviewers)
         if self.c['mode'] == 'ralph':
-            self.state['worker_tokens_reason'] = 'Native Ralph 2.1.2 runs iterations with --no-session and reports no token usage.'
-        if self.c['mode'] == 'ralph' and s['sessions']:
-            session = s['sessions'][-1]
-            self.state.update(ralph_usage_status=session.get('ralph_usage_status', 'legacy'),
-                              ralph_snapshot_limitation=session.get('ralph_snapshot_limitation'),
-                              ralph_path=session.get('ralph_path'), ralph_host_error=session.get('ralph_host_error'), ralph_freeze_error=getattr(self, 'ralph_freeze_error', None))
+            self.state.update(ralph_token_projection(self.root, s['sessions']))
+            if s['sessions']:
+                session = s['sessions'][-1]
+                self.state.update(ralph_usage_status=session.get('ralph_usage_status', 'legacy'),
+                                  ralph_snapshot_limitation=session.get('ralph_snapshot_limitation'),
+                                  ralph_path=session.get('ralph_path'), ralph_host_error=session.get('ralph_host_error'), ralph_freeze_error=getattr(self, 'ralph_freeze_error', None))
         if request:
             self.state.update(status='waiting_pi' if self.c['review_transport'] == 'pi' else 'waiting_codex', phase='review', request=str(request))
         else:
@@ -729,8 +777,10 @@ At logical boundary write {self.root / 'work/checkpoint.json'} (always this abso
         self.ralph_argument = argument if directory == target else '.'
         self.ralph_guards = self.rpc_cwd / '.ralph-runner/ppp-guards'
         self.ralph_guards.mkdir(parents=True, mode=0o700)
+        usage_dispatch = uuid.uuid4().hex
         guard = Path(__file__).with_name('ralph-parent-guard.mjs').as_uri()
         self.rpc_env = {'PPP_RALPH_GUARDS': str(self.ralph_guards), 'PPP_RALPH_GUARD_IMPORT': '--import=' + guard,
+                        'PPP_RALPH_USAGE_DISPATCH': usage_dispatch, 'PPP_RALPH_USAGE_TASK_DIR': str(directory),
                         'PPP_RALPH_ITERATION_SECONDS': str(min(self.c['cycle_seconds'], 3600)), 'RALPH_RUNNER_LOOP_TOKEN': '',
                         'NODE_OPTIONS': (os.environ.get('NODE_OPTIONS', '') + ' --import=' + guard).strip()}
         promise = 'PPP_RALPH_RESULT_' + uuid.uuid4().hex
@@ -760,7 +810,8 @@ Save progress and final checkpoint at {self.root / 'work/checkpoint.json'}, cycl
             runner_stat = (directory / '.ralph-runner').stat()
             state['sessions'][-1].update(ralph_path=str(task), ralph_task_sha256=digest(task), ralph_max_iterations=limit,
                                         ralph_task_identity=[task_stat.st_dev, task_stat.st_ino], ralph_runner_identity=[runner_stat.st_dev, runner_stat.st_ino], ralph_previous_loop_token=self.ralph_previous_loop_token,
-                                        ralph_cwd=str(self.rpc_cwd), ralph_snapshot_limitation=limitation, ralph_usage_status='reserved', ralph_guards=str(self.ralph_guards), cwd=str(self.rpc_cwd))
+                                        ralph_cwd=str(self.rpc_cwd), ralph_snapshot_limitation=limitation, ralph_usage_status='reserved',
+                                        ralph_usage_dispatch=usage_dispatch, ralph_guards=str(self.ralph_guards), cwd=str(self.rpc_cwd))
             p.Controller(self.c, state).event('ralph.loop_reserved', iterations=limit, task=str(task), snapshot_limitation=limitation)
 
     def ralph_state(self):
@@ -1487,6 +1538,9 @@ For chat transport record the JSON assessment once with python3 {script} review-
             lines.append(f'Native Goal result — {native.get("goal_status", "unknown")}; not acceptance. Recorded tokens: {s["worker_tokens"]}; usage: {s.get("goal_usage_status", "unknown")}.')
             if native.get('goal_limit') == 'worker_time':
                 lines.append(f'Worker time limit — cumulative {self.c["wall_seconds"]} seconds exhausted; no further Worker stage will start. Available results remain reviewable/deliverable.')
+        if self.c['mode'] == 'ralph':
+            tokens = self.state.get('worker_tokens')
+            lines.append(f'Ralph Worker tokens — {tokens} observed (partial, lower bound).' if tokens is not None else 'Ralph Worker tokens — not measured.')
         checkpoint = request.get('checkpoint')
         if isinstance(checkpoint, dict) and checkpoint.get('summary'):
             lines.append('Worker checkpoint — ' + str(checkpoint['summary'])[:240])
