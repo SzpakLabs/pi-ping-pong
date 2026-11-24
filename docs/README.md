@@ -25,4 +25,4 @@ These notes document earlier requirements, prototypes, and verification. Some us
 - Earlier protocol-2 evidence: [F1/F2 hardening](protocol-2-f1-f2-hardening.md), [F3/F4 hardening](protocol-2-f3-f4-hardening.md), [regression audit](protocol-2-regression-audit.md), and [E2E gate remediation](protocol-2-e2e-gate-remediation.md).
 - Historical smoke stand: [live E2E plan](protocol-2-live-e2e-plan.md), [Goal/Ralph readiness](protocol-2-goal-ralph-readiness.md) and [candidate manifest](protocol-2-goal-smoke-candidate.json), and [Goal preflight/result (NOT RUN)](protocol-2-goal-smoke-e2e-result.md).
 
-Keep supplementary docs here and the agent's operational reference under `references/`. Private run artifacts stay in ignored run storage, not in `docs/`.
+Keep supplementary docs here and the agent's operational reference under `references/`. Private run artifacts stay in run storage, not in `docs/` or Git; a private directory is not necessarily ignored.

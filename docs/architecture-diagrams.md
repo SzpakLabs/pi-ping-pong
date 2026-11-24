@@ -35,16 +35,16 @@ flowchart TD
     Goal --> Boundary
     Ralph --> Boundary
     Boundary --> Review["Independent review with its own deadline"]
-    Review --> Decision["Core validates assessment and chooses next state"]
-    Decision -->|Eligible work or grounded correction within limits| Core
-    Decision -->|No next dispatch| Outcome["Wait, stop, or record verified finish"]
+    Review -->|Assessment or review limitation| Decision["Core chooses the next state"]
+    Decision -->|Eligible work or concrete correction within limits| Core
+    Decision -->|No next dispatch| Outcome["Wait, stop, report blocked verification, or record finish"]
 ```
 
-Native Goal progress checkpoints do not force review or split the session. Ralph reserves native iterations before dispatch; interrupted or missing telemetry does not release that reservation. See [mode accounting](../references/reviewed-runs.md#budgets-and-goal-accounting).
+Native Goal progress checkpoints do not force review or split the session. Ralph reserves native iterations before dispatch; interrupted or missing native result telemetry does not release that reservation. [Observed Ralph tokens](../references/reviewed-runs.md#native-ralph-accounting-and-storage) are report-only, not allowance. See [mode accounting](../references/reviewed-runs.md#budgets-and-goal-accounting).
 
 ## Result and acceptance
 
-The decision order below abstracts [Core's transition logic](../scripts/action_protocol.py). A technical review failure holds the affected actions and dependencies; it is not a product defect. Explicit stop and integrity controls can preempt this flow.
+The decision order below abstracts [Core's transition logic](../scripts/action_protocol.py) after a settled boundary. A technical review failure holds affected actions and work that depends on them; it is not a product defect. Explicit stop and integrity controls can preempt this flow.
 
 ```mermaid
 flowchart TD
@@ -53,7 +53,7 @@ flowchart TD
     Finish -->|Otherwise| More{"Eligible authorized work within remaining limits?"}
     More -->|Yes, including independent work around a hold| Dispatch["Dispatch again"]
     More -->|No| Failure{"Verification blocked?"}
-    Failure -->|Yes| Preserve["Report retained work and unverified gaps; include known human needs"]
+    Failure -->|Yes| Preserve["Report blocked verification, retained work, and any known human needs"]
     Failure -->|No| Wait{"Genuine blocker, explicit grant needed, or arranged wake?"}
     Wait -->|Yes| Pause["Report available work; wait for addressed input or event"]
     Wait -->|No| Stop["Stop and report remaining gaps"]
@@ -67,7 +67,7 @@ This shows wake and resume, not an automatic rerun on reopening the UI. Concrete
 
 ```mermaid
 flowchart TD
-    Wait["Waiting with recorded wake source"] -->|Addressed confirmed response or matching resource event| Wake["Continue the same run"]
+    Wait["Waiting with recorded wake source"] -->|Confirmed response, matching signal, or scheduled recheck| Wake["Continue the same run"]
     Wait -.->|Reminder, no Worker or model turn| Wait
     Stop["Interrupted controller"] -->|Explicit resume| Wake
     Wake --> Check["Inspect persisted state, ownership, usage, and prior attempts"]

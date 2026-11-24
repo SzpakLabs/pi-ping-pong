@@ -9,10 +9,10 @@ flowchart TD
     Task["Task, scope, criteria, limits"] --> Core["Core dispatches authorized work"]
     Core --> Worker["Worker changes files and runs tests"]
     Worker -->|Retained result and test evidence| Review["Independent Reviewer checks remaining questions"]
-    Review -->|Assessment or review limitation| Decision["Core decides from validated evidence"]
-    Decision -->|Authorized next step within limits| Core
+    Review -->|Assessment or review limitation| Decision["Core validates the assessment or records the limitation"]
+    Decision -->|Eligible work or concrete correction within limits| Core
     Decision -->|Human input needed| Wait["Group requests after independent work"]
-    Decision -->|Verified finish or stop| Report["Report result and what was verified"]
+    Decision -->|Finish, stop, or blocked verification| Report["Report the available result and what was verified"]
 ```
 
 Core keeps working on eligible actions when another action is blocked. If review is unavailable or evidence is incomplete, Core preserves the result and reports what remains unverified. Uncertainty alone does not send the Worker back to make another change. Verified acceptance (`finish`) requires all criteria to pass, completed actions, resolved blockers, and reconciled effects; neither native completion nor a Reviewer endorsement is enough.
