@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install only this skill and its Pi receiver, preserving differing old files."""
+"""Copy the skill and optionally the legacy Pi receiver, backing up differing files."""
 import argparse
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skills-dir', type=Path, default=Path.home() / '.agents/skills')
     parser.add_argument('--extensions-dir', type=Path, default=Path.home() / '.pi/agent/extensions')
+    parser.add_argument('--skill-only', action='store_true', help='install the skill for Codex without copying a Pi auto-load receiver')
     args = parser.parse_args()
     source = Path(__file__).resolve().parent.parent
     target = args.skills_dir.expanduser().resolve() / 'pi-ping-pong'
@@ -48,9 +49,11 @@ def main():
                     or relative.as_posix() in tooling_files | {'scripts/check.sh', '.githooks/pre-commit'}
                 ):
                     copy_file(src, target / relative)
-    receiver = args.extensions_dir.expanduser().resolve() / 'pi-reviewed.ts'
-    copy_file(source / 'extensions/pi-reviewed.ts', receiver)
-    print(f'Skill: {target}\nPi receiver: {receiver}\nReload Pi before new launches.')
+    print(f'Skill: {target}')
+    if not args.skill_only:
+        receiver = args.extensions_dir.expanduser().resolve() / 'pi-reviewed.ts'
+        copy_file(source / 'extensions/pi-reviewed.ts', receiver)
+        print(f'Pi receiver: {receiver}\nReload Pi before new launches.')
 
 
 if __name__ == '__main__':

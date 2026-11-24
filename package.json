@@ -2,6 +2,10 @@
   "name": "pi-ping-pong",
   "version": "0.1.0",
   "private": true,
+  "pi": {
+    "extensions": ["./extensions/pi-reviewed.ts"],
+    "skills": ["./SKILL.md"]
+  },
   "scripts": {
     "lint": "eslint extensions/*.ts scripts/*.mjs",
     "typecheck": "tsc --project tsconfig.json",

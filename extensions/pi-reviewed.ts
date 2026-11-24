@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 type Binding = { root: string; runId: string; sessionId: string };
@@ -19,6 +20,13 @@ const runNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const safeRunId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(value);
 const read = <T>(file: string): T => JSON.parse(fs.readFileSync(file, 'utf8')) as T;
+const packagedBridge = fileURLToPath(new URL('../scripts/bridge.py', import.meta.url));
+function bridgeScript() {
+  // The old installer copies the receiver outside the skill directory.
+  return process.env.PI_PING_PONG_BRIDGE || (fs.existsSync(packagedBridge)
+    ? packagedBridge
+    : path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py'));
+}
 function atomicText(file: string, text: string) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, text, { mode: 0o600, flag: 'wx' });
@@ -740,7 +748,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
     if (!headless && config.review_provider && ctx.model?.provider !== config.review_provider) throw new Error(`Select reviewer provider ${config.review_provider} before launch.`);
     const attemptFile = path.join(root, 'launch-attempt.json');
     if (fs.existsSync(attemptFile) || fs.existsSync(path.join(root, 'bridge-status.json')) || config.pi_session_id) throw new Error('Run already launched; inspect its state instead of replaying it.');
-    const script = process.env.PI_PING_PONG_BRIDGE || path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py');
+    const script = bridgeScript();
     if (config.protocol_version !== 2 || config.eval_argv !== undefined) throw new Error('Evaluator-era configs are unsupported; prepare a new protocol 2 run without eval_argv. Old run files are preserved.');
     const task = typeof config.task === 'string' ? path.resolve(root, config.task) : '';
     if (!regularPrivateRunFile(root, task)) throw new Error('Launch needs a private TASK file inside the run.');
@@ -1037,7 +1045,7 @@ export default function reviewedRuns(pi: ExtensionAPI) {
         if (fs.lstatSync(inbox).isSymbolicLink() || !isPrivate(fs.statSync(inbox))) throw new Error('Human inbox must be a private non-symlink directory.');
         atomic(path.join(inbox, `${id}.json`), { protocol_version: 2, schema_version: 1, run_id: binding.runId, session_id: binding.sessionId, id, source: 'pi-command', ...input });
         pi.appendEntry('pi-ppp-human', { run_id: binding.runId, response_id: id, kind: input.kind });
-        const script = process.env.PI_PING_PONG_BRIDGE || path.join(os.homedir(), '.agents/skills/pi-ping-pong/scripts/bridge.py');
+        const script = bridgeScript();
         const fd = fs.openSync(path.join(binding.root, 'launcher.log'), 'a', 0o600);
         try {
           const child = spawn('python3', ['-B', script, 'wake', '--config', path.join(binding.root, 'config.json')], { cwd: binding.root, detached: true, stdio: ['ignore', fd, fd] });
