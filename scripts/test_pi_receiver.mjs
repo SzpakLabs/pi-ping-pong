@@ -10,12 +10,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const gitLocalVars = execFileSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' }).trim().split(/\s+/);
 for (const name of gitLocalVars) delete process.env[name];
 
-const packageJson = process.env.PI_PACKAGE_JSON || path.join(os.homedir(), '.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/package.json');
+const packageJson = process.env.PI_PACKAGE_JSON || fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url));
 const require = createRequire(packageJson);
 const { createJiti } = require('jiti');
 const jiti = createJiti(import.meta.url);
-const module = await jiti.import(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../extensions/pi-reviewed.ts'));
-const extension = module.default ?? module;
 const packageRoot = path.dirname(packageJson);
 const { loadExtensions } = await import(pathToFileURL(path.join(packageRoot, 'dist/core/extensions/loader.js')).href);
 const { ExtensionRunner } = await import(pathToFileURL(path.join(packageRoot, 'dist/core/extensions/runner.js')).href);
@@ -35,7 +33,17 @@ fs.mkdirSync(projectPath, { mode: 0o700 });
 execFileSync('git', ['init', '--quiet', projectPath]);
 const project = fs.realpathSync(projectPath);
 fs.writeFileSync(path.join(project, '.gitignore'), '/.pi/ping-pong/\n');
-fs.writeFileSync(fakeBridge, `from pathlib import Path\nPath(${JSON.stringify(childMarker)}).write_text('spawned')\n`);
+const writeBridge = (file, kind) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `from pathlib import Path\nimport sys\np = Path(${JSON.stringify(childMarker)})\ntmp = p.with_suffix('.tmp')\ntmp.write_text(${JSON.stringify(kind)} + ':' + sys.argv[1])\ntmp.replace(p)\n`);
+};
+writeBridge(fakeBridge, 'override');
+const packageFixture = path.join(root, 'Test installed package');
+const packagedReceiver = path.join(packageFixture, 'extensions', 'pi-reviewed.ts');
+writeBridge(path.join(packageFixture, 'scripts', 'bridge.py'), 'package');
+fs.mkdirSync(path.dirname(packagedReceiver));
+fs.copyFileSync(receiverPath, packagedReceiver);
+const { default: extension } = await jiti.import(packagedReceiver);
 const previousBridge = process.env.PI_PING_PONG_BRIDGE;
 const previousHome = process.env.HOME;
 process.env.PI_PING_PONG_BRIDGE = fakeBridge;
@@ -111,10 +119,15 @@ const pi = {
 };
 extension(pi);
 const runCommand = (name, args = '') => commands.get(name).handler(args, ctx);
-const waitForChild = async () => {
+const waitForChild = async (invocation = 'override') => {
   for (let attempt = 0; attempt < 50 && !fs.existsSync(childMarker); attempt++) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(fs.existsSync(childMarker), true, 'only an explicit launch should start the synthetic fake bridge');
-  fs.rmSync(childMarker, { force: true });
+  assert.ok(fs.existsSync(childMarker), 'an explicit launch or wake should start the synthetic bridge');
+  assert.ok(fs.readFileSync(childMarker, 'utf8').startsWith(invocation), `bridge should use ${invocation}`);
+  fs.rmSync(childMarker);
+};
+const withoutOverride = async run => {
+  delete process.env.PI_PING_PONG_BRIDGE;
+  try { await run(); } finally { process.env.PI_PING_PONG_BRIDGE = fakeBridge; }
 };
 try {
   for (const alias of ['reviewed-run', 'ppp']) assert.strictEqual(commands.get(alias).handler, commands.get('pi-ping-pong').handler, `${alias} must use the same launcher/menu handler`);
@@ -734,13 +747,16 @@ try {
   assert.equal(messages.length, beforeCoalescing + 2, 'durable supersession/delivery receipts prevent replay on another poll');
   ctx.model = modelBeforeHeadless;
 
+  writeBridge(path.join(fallbackHome, '.agents', 'skills', 'pi-ping-pong', 'scripts', 'bridge.py'), 'legacy');
   const readyLaunch = makeReadyRun('ready-launch-run');
   const readyLaunchConfig = path.join(readyLaunch, 'config.json');
   const preciseLaunchText = `${JSON.stringify(tempConfig(readyLaunch)).slice(0, -1)},"thread_id":"Test-old-thread","large_integer":9007199254740993,"unknown_extension":{"nested":[1782320241724273514,{"value":9007199254740995}]}}\n`;
   fs.writeFileSync(readyLaunchConfig, preciseLaunchText, { mode: 0o600 });
   chmodPrivate(readyLaunchConfig);
-  await runCommand('pi-ping-pong', readyLaunchConfig);
-  await waitForChild();
+  await withoutOverride(async () => {
+    await runCommand('pi-ping-pong', readyLaunchConfig);
+    await waitForChild('package:run');
+  });
   const launchedConfig = JSON.parse(fs.readFileSync(path.join(readyLaunch, 'config.json'), 'utf8'));
   assert.equal(launchedConfig.pi_session_id, 'Test-session', 'session binding happens only at actual launcher time');
   assert.equal(launchedConfig.review_transport, 'pi');
@@ -785,7 +801,7 @@ try {
   fs.copyFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'install.py'), path.join(installSkill, 'scripts', 'install.py'));
   write(path.join(installSkill, 'SKILL.md'), 'Synthetic installer fixture.');
   fs.copyFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'output_snapshot.py'), path.join(installSkill, 'scripts', 'output_snapshot.py'));
-  write(path.join(installSkill, 'extensions', 'pi-reviewed.ts'), 'export {};');
+  fs.copyFileSync(receiverPath, path.join(installSkill, 'extensions', 'pi-reviewed.ts'));
   write(path.join(installSkill, '.pi-ping-pong', 'runs', 'test-secret-run', 'TASK.md'), 'private synthetic artifact');
   write(path.join(installSkill, '.pi-ping-pong', 'runs', 'test-secret-run', 'eval.py'), 'raise SystemExit(1)');
   write(path.join(installSkill, '.pi', 'ping-pong', 'manual-e2e', 'Test-private.md'), 'private synthetic artifact');
@@ -804,6 +820,22 @@ try {
   }
   assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', 'extensions', 'pi-reviewed.ts')), true, 'installer still installs receiver source');
   assert.equal(fs.existsSync(path.join(installOut, 'pi-ping-pong', 'scripts', 'output_snapshot.py')), true, 'installer includes scoped discovery helper without run artifacts');
+  const skillOnlyOut = path.join(root, 'Test-skill-only');
+  const unusedExtensions = path.join(root, 'Test-no-extensions');
+  const skillOnly = spawnSync('python3', ['-B', path.join(installSkill, 'scripts', 'install.py'), '--skill-only', '--skills-dir', skillOnlyOut, '--extensions-dir', unusedExtensions], { encoding: 'utf8' });
+  assert.equal(skillOnly.status, 0, skillOnly.stderr);
+  assert.ok(fs.existsSync(path.join(skillOnlyOut, 'pi-ping-pong', 'SKILL.md')));
+  assert.ok(!fs.existsSync(unusedExtensions), 'Codex skill-only install must not register a second Pi receiver');
+  const { default: copiedExtension } = await jiti.import(path.join(extensionOut, 'pi-reviewed.ts'));
+  const copiedCommands = new Map(), copiedHooks = new Map();
+  copiedExtension({ ...pi, registerCommand: (...row) => copiedCommands.set(...row), on: (...row) => copiedHooks.set(...row) });
+  const copiedConfig = path.join(makeReadyRun('test-copied-receiver'), 'config.json');
+  try {
+    await withoutOverride(async () => {
+      await copiedCommands.get('ppp').handler(copiedConfig, ctx);
+      await waitForChild('legacy:run');
+    });
+  } finally { await copiedHooks.get('session_shutdown')(); }
   // Protocol-2 ingress is a native, explicitly confirmed human command, never a review/model flag.
   await hooks.get('session_shutdown')();
   const actionRoot = path.join(root, 'Test-action-scoped');
@@ -836,8 +868,10 @@ try {
   await respond({ kind: 'resolution', blocker_ids: ['B1'], message: 'Test configured securely' });
   assert.equal(humanFiles().length, 0, 'cancelled human dialog creates no authority');
   confirmAnswers.push(true);
-  await respond({ kind: 'resolution', blocker_ids: ['B1'], message: 'Test configured securely' });
-  await waitForChild();
+  await withoutOverride(async () => {
+    await respond({ kind: 'resolution', blocker_ids: ['B1'], message: 'Test configured securely' });
+    await waitForChild('package:wake');
+  });
   assert.equal(humanFiles().length, 1);
   const addressed = JSON.parse(fs.readFileSync(path.join(actionRoot, 'human-inbox', humanFiles()[0]), 'utf8'));
   assert.deepEqual(addressed.blocker_ids, ['B1'], 'partial resolution addresses only specified blockers');
