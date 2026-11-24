@@ -460,6 +460,7 @@ class Bridge2Tests(unittest.TestCase):
             promise = native_task.split('completion_promise: ')[1].splitlines()[0]
             self.assertIn('output <promise>' + promise + '</promise>', native_task)
             self.assertNotIn('End this one native Ralph iteration', (root / 'CONTRACT.md').read_text())
+            self.assertIn('Save the actual results of explicitly requested tests', (root / 'CONTRACT.md').read_text())
 
     def test_native_ralph_usage_recovery_is_idempotent_and_identity_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
