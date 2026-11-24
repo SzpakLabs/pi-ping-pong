@@ -9,4 +9,5 @@ run() {
 run bun run lint
 run bun run typecheck
 run node scripts/test_pi_receiver.mjs
+run node scripts/test_ralph_usage.mjs
 exit "$status"

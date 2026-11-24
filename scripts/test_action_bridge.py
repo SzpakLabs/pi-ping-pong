@@ -327,6 +327,10 @@ for line in sys.stdin.buffer:
   out=directory/'.ralph-runner/status.json'; out.parent.mkdir(parents=True,exist_ok=True)
   state=dict(ralphPath=str(task),taskDir=str(directory),cwd=str(initial_cwd),currentIteration=iterations,maxIterations=grant,status='running',loopToken='Test-token-'+str(ctx['cycle']))
   out.write_text(json.dumps(state))
+  if os.environ.get('PPP_TEST_RALPH_TOKENS'):
+   usage=Path(os.environ['PPP_RALPH_GUARDS'])/'usage.json'; pending=usage.with_suffix('.tmp')
+   pending.write_text(json.dumps(dict(host=os.getpid(),dispatch=os.environ['PPP_RALPH_USAGE_DISPATCH'],loop_token=state['loopToken'],tokens=37)))
+   pending.chmod(0o600); pending.replace(usage)
   if os.environ.get('PPP_TEST_RALPH_HOLD'): time.sleep(30)
   for item in ctx.get('action_ids',[aid]):
    if not os.environ.get('PPP_TEST_CLAIM_ONLY') and not (os.environ.get('PPP_TEST_BLOCKER') and item=='email' and not Path('Test-secure-configured').exists()): Path(item+'.txt').write_text('Test wrong product' if os.environ.get('PPP_TEST_WRONG_OUTPUT') else 'Test independently inspectable '+item)
@@ -435,7 +439,7 @@ class Bridge2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _, env = self.fixture(root, mode='ralph', cycles=4)
-            env.update(PPP_TEST_RALPH_ITERATIONS='3', PPP_TEST_ASSERT_WRITER_SEPARATION='1')
+            env.update(PPP_TEST_RALPH_ITERATIONS='3', PPP_TEST_ASSERT_WRITER_SEPARATION='1', PPP_TEST_RALPH_TOKENS='1')
             proc = self.launch(root, env)
             self.assertEqual(proc.wait(timeout=20), 0, (root / 'Test-run.log').read_text())
             state = b.read(root / 'execution-state.json')
@@ -445,6 +449,10 @@ class Bridge2Tests(unittest.TestCase):
             self.assertEqual(len(state['consumption'][0]['worker_iteration_grants']), 3)
             self.assertEqual(state['sessions'][0]['ralph_max_iterations'], 4)
             self.assertEqual(state['sessions'][0]['ralph_usage_status'], 'known')
+            status = b.read(root / 'bridge-status.json')
+            self.assertEqual((status['worker_tokens'], status['worker_tokens_status']), (37, 'partial'))
+            self.assertEqual(status['worker_tokens_by_action'], {state['sessions'][0]['action_id']: 37})
+            self.assertEqual(state['worker_tokens'], 0, 'Does not charge the Goal ledger')
             self.assertEqual(set(state['acceptance'].values()), {'pass'})
             self.assertEqual(len((root / 'work/Test-worker-prompts.jsonl').read_text().splitlines()), 1)
             native_task = (root / 'ralph/001/RALPH.md').read_text()
@@ -473,6 +481,50 @@ class Bridge2Tests(unittest.TestCase):
             state = core.store.read()
             self.assertEqual(state['consumption'][0]['worker_iterations'], 3)
             self.assertIn('identity changed', state['sessions'][0]['ralph_usage_error'])
+
+    def test_ralph_token_recovery_replaces_snapshot_and_rejects_foreign_or_broken_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root, mode='ralph')
+            core = ab.ActionBridge(b.load_config(root / 'config.json'))
+            sessions = []
+            for cycle, aid in enumerate(('email', 'footer', 'email'), 1):
+                directory = root / f'Test-guard-{cycle}'
+                directory.mkdir(mode=0o700)
+                sessions.append(dict(action_id=aid, pid=42, ralph_usage_dispatch=f'Test-dispatch-{cycle}',
+                                     ralph_loop_token=f'Test-loop-{cycle}', ralph_guards=str(directory)))
+            with core.store.transaction(create=p.initial(core.c, {})) as state:
+                state['sessions'] = sessions
+            original = core.store.path.read_bytes()
+
+            def record(session, tokens):
+                return dict(dispatch=session['ralph_usage_dispatch'], loop_token=session['ralph_loop_token'], host=session['pid'], tokens=tokens)
+
+            def project(tokens, status, actions):
+                recovered = ab.ActionBridge(b.load_config(root / 'config.json'))
+                recovered.project()
+                result = b.read(root / 'bridge-status.json')
+                self.assertEqual((result['worker_tokens'], result['worker_tokens_status'], result['worker_tokens_by_action']), (tokens, status, actions))
+                self.assertEqual(recovered.store.path.read_bytes(), original, 'Recovery cannot mutate review-bound execution state')
+
+            project(None, 'not_measured', {'email': None, 'footer': None})
+            paths = [Path(row['ralph_guards']) / 'usage.json' for row in sessions]
+            p.durable(paths[0], record(sessions[0], 11))
+            p.durable(paths[0].with_suffix('.tmp'), record(sessions[0], 999))  # Unpublished crash residue.
+            p.durable(paths[2], record(sessions[2], 20))
+            for bad in ({'dispatch': 'Test-foreign'}, {'loop_token': 'Test-foreign'}, {'host': 41}, {'tokens': True}, {'tokens': -1}):
+                p.durable(paths[1], {**record(sessions[1], 9), **bad})
+                project(31, 'partial', {'email': 31, 'footer': None})
+            paths[1].write_text('{')
+            project(31, 'partial', {'email': 31, 'footer': None})
+            paths[1].unlink()
+            paths[1].symlink_to(paths[0])
+            project(31, 'partial', {'email': 31, 'footer': None})
+            p.durable(paths[0], record(sessions[0], 25))
+            p.durable(paths[1], record(sessions[1], 0))
+            self.assertEqual(ab.ralph_token_projection(root, [sessions[0], *sessions])['worker_tokens'], 45)
+            project(45, 'partial', {'email': 45, 'footer': 0})
+            project(45, 'partial', {'email': 45, 'footer': 0})
 
     def test_native_ralph_mixed_scope_window_and_release_use_both_budgets(self):
         with tempfile.TemporaryDirectory() as tmp:

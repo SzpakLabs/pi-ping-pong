@@ -1069,6 +1069,12 @@ try {
   selectAnswers.push((_title, options) => options.find(row => row.includes('Test-other-human-dialog —')), 'Done');
   await commands.get('ppp-status').handler('', dialogContext);
   assert.match(String(notices.at(-1)[0]), /Test required evidence is missing/);
+  assert.match(String(notices.at(-1)[0]), /Ralph Worker tokens: not measured/);
+  write(path.join(otherDialogRoot, 'bridge-status.json'), { run_id: 'Test-other-dialog', status: 'attention_required', phase: 'verification_blocked', cycle: 2, main_remaining: 3, worker_tokens: 37, worker_tokens_status: 'partial' });
+  selectAnswers.push((_title, options) => options.find(row => row.includes('Test-other-human-dialog —')), 'Done');
+  await commands.get('ppp-status').handler('', dialogContext);
+  assert.match(String(notices.at(-1)[0]), /Ralph Worker tokens: 37 observed \(partial, lower bound\)/);
+  assert.match(String(notices.at(-1)[0]), /Main remaining: 3/);
   selectAnswers.push(selectCompletedStatus, 'Technical details');
   await commands.get('ppp-status').handler('', dialogContext);
   const selectedTechnical = String(notices.at(-1)[0]);
