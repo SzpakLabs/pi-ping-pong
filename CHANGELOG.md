@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Maintainers: publish to npm from a pushed `v*` tag with GitHub Actions trusted publishing.
+
 ## 0.1.1 - 2026-11-25
 
 - Add `npm:pi-ping-pong` as an alternative Pi package source, with the receiver, skill, runtime scripts, and operational docs. Git installs and the standalone Codex skill remain available; Python remains a separate prerequisite.
