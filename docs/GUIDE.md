@@ -14,26 +14,26 @@
 If you used `scripts/install.py` before, [disable that receiver first](#migrate-from-the-copy-installer). Install PPP with Pi:
 
 ```sh
-pi install git:github.com/SzpakLabs/pi-ping-pong
+pi install npm:pi-ping-pong
 ```
 
-After the first npm release, you can use `pi install npm:pi-ping-pong` instead. Until then, the registry name is not an installation path. To try an unpublished checkout, run `pi install /absolute/path/to/pi-ping-pong`. Pi loads that checkout in place; update it with Git, not `pi update`. Install only one source for PPP at a time.
+To follow the Git repository instead, use `pi install git:github.com/SzpakLabs/pi-ping-pong`. To try an unpublished checkout, run `pi install /absolute/path/to/pi-ping-pong`. Pi loads that checkout in place; update it with Git, not `pi update`. Install only one source for PPP at a time.
 
 Open a new Pi session or run `/reload`. To check the installation without starting work, look for `/skill:pi-ping-pong` in command completion and run `/ppp-status`. The package includes the receiver, skill, and Python bridge. npm does not install Python: `python3 --version` should report 3.10 or newer, and no Python libraries need to be installed for PPP. The package also does not install model credentials, Goal, or Ralph.
 
 ### Update or remove
 
 ```sh
-pi update git:github.com/SzpakLabs/pi-ping-pong
-# For an npm installation, use this instead:
-# pi update npm:pi-ping-pong
+pi update npm:pi-ping-pong
+# For a Git installation, use this instead:
+# pi update git:github.com/SzpakLabs/pi-ping-pong
 # Or update all installed Pi packages:
 pi update --extensions
 ```
 
-Bare `pi update` updates Pi itself, not PPP. An exact npm version pin (for example, `npm:pi-ping-pong@0.1.1` once released) or a Git tag/commit pin stays fixed. Update between runs: Pi can replace package files in place, and an existing bridge can still need its companion scripts. Reopen Pi or run `/reload` to load the updated resources.
+Bare `pi update` updates Pi itself, not PPP. An exact npm version pin (for example, `npm:pi-ping-pong@0.1.1`) or a Git tag/commit pin stays fixed. Update between runs: Pi can replace package files in place, and an existing bridge can still need its companion scripts. Reopen Pi or run `/reload` to load the updated resources.
 
-Use `pi remove <source>` with the source in `pi list` (for example, `pi remove git:github.com/SzpakLabs/pi-ping-pong` or `pi remove npm:pi-ping-pong`). When switching sources, remove the old one before installing the new one. Project run records and any independent Codex skill copy remain in place.
+Use `pi remove <source>` with the source in `pi list` (for example, `pi remove npm:pi-ping-pong` or `pi remove git:github.com/SzpakLabs/pi-ping-pong`). When switching sources, remove the old one before installing the new one. Project run records and any independent Codex skill copy remain in place.
 
 ### Migrate from the copy installer
 

@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-11-25
 
+- Make `pi install npm:pi-ping-pong` the primary installation command; Git remains an alternative.
 - Maintainers: publish to npm from a pushed `v*` tag with GitHub Actions trusted publishing.
 
 ## 0.1.1 - 2026-11-25
