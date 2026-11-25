@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Prepare `npm:pi-ping-pong` as an alternative Pi package source, with the receiver, skill, runtime scripts, and operational docs. Git installs and the standalone Codex skill remain available; Python remains a separate prerequisite. Installation by npm name starts after publication.
+
 ## 0.1.0
 
 First tagged release of the Pi package. The project was already available from Git before this release.
