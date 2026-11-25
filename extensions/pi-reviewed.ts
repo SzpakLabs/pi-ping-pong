@@ -427,7 +427,7 @@ For browser tasks, determine one usable Playwright route when practical: prefer 
 
 Use protocol_version=2 and schema_version=1. config.json needs a unique RFC 4122 UUID run_id (not the folder name), mode goal|ralph|ping-pong, worker_provider, worker_model, thinking, review_provider, review_model, task and positive finite integer review_seconds, wall_seconds, plus max_cycles and cycle_seconds for ralph/ping-pong (optional for goal, which is bounded by wall_seconds, goal_max_launches and optional goal_tokens). Defaults: worker_provider=openai-codex, worker_model=gpt-6-luna, thinking=low, max_cycles=10 unless user requested alternatives; do not ask to confirm approved defaults. Review provider/model default to the current Pi model (${reviewerDefault}), without confirmation unless missing or explicitly overridden. Use review_transport=pi and review_execution=headless for a separate Core-owned read-only Reviewer session; its model need not match Chat A at launch.
 
-Include execution_contract: target (absolute authorized output/source path for filesystem tasks), actions (stable id, description, depends_on, pre-authorized operations), complete criteria ID/description map, closure={authorized:true,max_cycles:null} only where actual initial task authority permits closure, reminder_seconds=86400 unless configured otherwise. Cwd/Git ancestry grants no authority. Retain actual scope, approval and side-effect restrictions. Never fabricate closure authorization, identity, human input or budget. Old evaluator-era runs cannot resume with this implementation; preserve their files, do not migrate them silently.
+Include execution_contract: target (absolute authorized output/source path for filesystem tasks), actions (stable id, description, depends_on, operations: [] unless pre-authorizing external side effects, each an object {id, target, kind[, approval_blocker]}; local edits and tests are not operations), complete criteria ID/description map, closure={authorized:true,max_cycles:null} only where actual initial task authority permits closure, reminder_seconds=86400 unless configured otherwise. Cwd/Git ancestry grants no authority. Retain actual scope, approval and side-effect restrictions. Never fabricate closure authorization, identity, human input or budget. Old evaluator-era runs cannot resume with this implementation; preserve their files, do not migrate them silently.
 
 Keep PPP run directories private 0700; leave existing Pi settings permissions unchanged. Keep TASK.md and config.json mode 0600. No secrets. Do not write pi_session_id, launch-attempt.json or session entries; explicit launch binds identity. Do not run Worker, Goal/Ralph, bridge run, or paid/live checks during preparation.
 
@@ -757,6 +757,14 @@ export default function reviewedRuns(pi: ExtensionAPI) {
       review_transport: 'pi', pi_session_id: sessionId,
       ...(!headless ? { review_provider: ctx.model!.provider } : {}),
     }, ['thread_id']);
+    try { execFileSync('python3', ['-B', script, 'check', '--config', file], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (error) {
+      // Only a real validator failure (exit status) refuses; a missing python falls through to the normal spawn error.
+      if (typeof (error as { status?: unknown }).status === 'number') {
+        const stderr = String((error as { stderr?: unknown }).stderr ?? '').trim().split('\n').pop();
+        throw new Error(`Config is invalid; nothing was launched and you can fix it and launch again: ${stderr}`);
+      }
+    }
     if (project) warnIfVisible(ctx, project, canonicalRun);
     let attemptFd: number;
     try { attemptFd = fs.openSync(attemptFile, 'wx', 0o600); }

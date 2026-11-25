@@ -35,7 +35,7 @@ const project = fs.realpathSync(projectPath);
 fs.writeFileSync(path.join(project, '.gitignore'), '/.pi/ping-pong/\n');
 const writeBridge = (file, kind) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `from pathlib import Path\nimport sys\np = Path(${JSON.stringify(childMarker)})\ntmp = p.with_suffix('.tmp')\ntmp.write_text(${JSON.stringify(kind)} + ':' + sys.argv[1])\ntmp.replace(p)\n`);
+  fs.writeFileSync(file, `from pathlib import Path\nimport sys\nif sys.argv[1] == 'check': sys.exit(0)\np = Path(${JSON.stringify(childMarker)})\ntmp = p.with_suffix('.tmp')\ntmp.write_text(${JSON.stringify(kind)} + ':' + sys.argv[1])\ntmp.replace(p)\n`);
 };
 writeBridge(fakeBridge, 'override');
 const packageFixture = path.join(root, 'Test installed package');
@@ -289,6 +289,14 @@ try {
   await assert.rejects(runCommand('pi-ping-pong', 'provider-check-run'), /Select reviewer provider test-review-provider/);
   assert.equal(fs.existsSync(path.join(providerRun, 'launch-attempt.json')), false, 'provider mismatch must refuse launch before recording an attempt');
   ctx.model.provider = 'test-review-provider';
+
+  const badOpsRun = makeReadyRun('bad-operations-run');
+  fs.writeFileSync(path.join(root, 'bad-bridge.py'), 'import sys\nif sys.argv[1] == "check": print("Action x: bad operation", file=sys.stderr); sys.exit(1)\n');
+  const savedBridge = process.env.PI_PING_PONG_BRIDGE;
+  process.env.PI_PING_PONG_BRIDGE = path.join(root, 'bad-bridge.py');
+  try { await assert.rejects(runCommand('ppp', 'bad-operations-run'), /Config is invalid; nothing was launched.*bad operation/); }
+  finally { process.env.PI_PING_PONG_BRIDGE = savedBridge; }
+  assert.equal(fs.existsSync(path.join(badOpsRun, 'launch-attempt.json')), false, 'an invalid contract must not burn the run');
 
   const launchedDir = makeRun('test-started', { config: tempConfig(path.join(storage, 'test-started')), launched: true });
   const noStatusAttempt = userMessages.length;

@@ -586,6 +586,8 @@ No authority beyond the task. Simulated people's names must contain Test.
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest='command', required=True)
+    check = commands.add_parser('check')
+    check.add_argument('--config', required=True)
     run = commands.add_parser('run')
     run.add_argument('--config', required=True)
     decide = commands.add_parser('decide')
@@ -615,6 +617,10 @@ def main():
     operation.add_argument('--operation-id', required=True)
     operation.add_argument('--owner', required=True)
     args = parser.parse_args()
+    if args.command == 'check':
+        from action_protocol import validate_contract
+        validate_contract(json.loads(Path(args.config).read_text()))  # same validator as load_config, run before the launch marker
+        return 0
     c = load_config(args.config)
     from action_bridge import dispatch
     return dispatch(c, args)

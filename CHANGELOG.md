@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.4 - 2026-11-25
+
+- Fix: a run whose prepared config had an invalid `operations` entry (for example plain strings) failed only after launch was recorded and could not be relaunched. The config is now checked just before launch, so you can fix it and launch again.
+- Document the `operations` format (only external side effects; use `[]` for local work) and give a clear error for malformed operations.
 - Maintainers: document how to test a local checkout in Pi.
 
 ## 0.1.3 - 2026-11-25

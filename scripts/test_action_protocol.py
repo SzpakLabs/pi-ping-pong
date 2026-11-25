@@ -41,6 +41,12 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.initial(c, {})
 
+    def test_string_operations_get_a_clear_error(self):
+        c = config()
+        c['execution_contract']['actions'][0]['operations'] = ['Create or edit slugify.py']
+        with self.assertRaisesRegex(ValueError, "Action footer: each operation must be an object"):
+            p.validate_contract(c)
+
     def test_blocker_identity_survives_cycles_and_rediscovery(self):
         b = self.blocker()
         self.s['cycle'] = 4

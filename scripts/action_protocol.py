@@ -72,6 +72,7 @@ def action(raw):
     ops = raw.get('operations', [])
     require(isinstance(ops, list), 'Invalid operations')
     for op in ops:
+        require(isinstance(op, dict) and 'id' in op, f"Action {raw['id']}: each operation must be an object {{id, target, kind[, approval_blocker]}}; local edits and tests are not operations, use []")
         require(set(op) <= {'id', 'target', 'kind', 'approval_blocker'}, 'Unknown operation fields')
         ident(op['id'])
         text(op['target'])
