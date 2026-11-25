@@ -1,7 +1,41 @@
 {
   "name": "pi-ping-pong",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
+  "description": "Run bounded Pi coding tasks with independent review.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SzpakLabs/pi-ping-pong.git"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "SKILL.md",
+    "docs/GUIDE.md",
+    "docs/action-scoped-protocol.md",
+    "docs/evaluator-preparation.md",
+    "docs/headless-reviewer.md",
+    "docs/manual-e2e.md",
+    "docs/manual-e2e-report-template.md",
+    "docs/project-workspace.md",
+    "extensions/pi-reviewed.ts",
+    "references/reviewed-runs.md",
+    "scripts/action_bridge.py",
+    "scripts/action_protocol.py",
+    "scripts/bridge.py",
+    "scripts/headless_reviewer.py",
+    "scripts/launch_diff.py",
+    "scripts/output_snapshot.py",
+    "scripts/ppp_checkpoint.py",
+    "scripts/ralph-parent-guard.mjs"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "pi": {
     "extensions": ["./extensions/pi-reviewed.ts"],
     "skills": ["./SKILL.md"]
