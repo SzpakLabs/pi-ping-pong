@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-11-25
 
-- Prepare `npm:pi-ping-pong` as an alternative Pi package source, with the receiver, skill, runtime scripts, and operational docs. Git installs and the standalone Codex skill remain available; Python remains a separate prerequisite. Installation by npm name starts after publication.
+- Add `npm:pi-ping-pong` as an alternative Pi package source, with the receiver, skill, runtime scripts, and operational docs. Git installs and the standalone Codex skill remain available; Python remains a separate prerequisite.
 
 ## 0.1.0
 
