@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - 2026-11-25
+
+- Rewrite the README as a shorter, scannable introduction with a four-step quick start.
+
 ## 0.1.2 - 2026-11-25
 
 - Make `pi install npm:pi-ping-pong` the primary installation command; Git remains an alternative.

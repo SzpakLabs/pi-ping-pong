@@ -1,48 +1,58 @@
 # Pi Ping Pong
 
-Pi Ping Pong is a local controller for running a coding task in Pi with explicit scope, acceptance criteria, and finite execution limits. A Worker does the work; a separate Reviewer checks what its tests and other evidence do not settle. Core decides whether to continue, wait, stop, or record verified acceptance.
+**Let Pi work on a coding task while an independent reviewer checks the result.**
 
-**Experimental (0.x).** The workflow and compatibility may change. Use it on tasks where you can inspect the results; local checks do not establish live model acceptance.
+You describe the task, allowed paths and limits. A Worker builds and runs the tests. A separate Reviewer looks at what those tests do not settle. A controller (Core) then decides: continue with a concrete correction, wait for you, stop, or accept.
 
-A passing test suite answers only the questions it actually checks. A Worker can finish with a green suite and still miss a requirement, change something outside scope, or leave the result hard to verify. The point of the separate review is to examine those gaps, not to run the same tests again or to treat a second model's opinion as proof.
+> **Experimental (0.x).** The workflow may change. Use it on tasks whose results you can inspect.
 
-```mermaid
-flowchart TD
-    Task["Task, scope, criteria, limits"] --> Core["Core dispatches authorized work"]
-    Core --> Worker["Worker changes files and runs tests"]
-    Worker -->|Retained result and test evidence| Review["Independent Reviewer checks remaining questions"]
-    Review -->|Assessment or review limitation| Decision["Core validates the assessment or records the limitation"]
-    Decision -->|Eligible work or concrete correction within limits| Core
-    Decision -->|Human input needed| Wait["Group requests after independent work"]
-    Decision -->|Finish, stop, or blocked verification| Report["Report the available result and what was verified"]
+## Why a reviewer
+
+A green test suite only proves what it checks. A Worker can pass it and still miss a requirement, touch files outside scope, or leave a result that is hard to verify. The Reviewer examines those gaps. It does not rerun the same tests, and its opinion is not treated as proof.
+
+```text
+Task + limits -> Worker: build, test -> Reviewer: check gaps -> Core decides
+                      ^                                             |
+                      +------- concrete correction, within limits --+
+                               or: ask you / stop / accept
 ```
 
-Core keeps working on eligible actions when another action is blocked. If review is unavailable or evidence is incomplete, Core preserves the result and reports what remains unverified. Uncertainty alone does not send the Worker back to make another change. Verified acceptance (`finish`) requires all criteria to pass, completed actions, resolved blockers, and reconciled effects; neither native completion nor a Reviewer endorsement is enough.
+If review is unavailable or evidence is incomplete, your work is kept and the report says what is unverified. Uncertainty alone never sends the Worker back for another change.
 
-## Execution modes
+## Quick start
 
-| Worker mode | When independent review happens | Main Worker limits |
+1. **Install** (Python 3.10+ must be on `PATH` as `python3`):
+
+   ```sh
+   pi install npm:pi-ping-pong
+   ```
+
+   Use one install source only. Prefer Git? `pi install git:github.com/SzpakLabs/pi-ping-pong`. Used the old copy installer? [Disable the copied receiver first](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/GUIDE.md#migrate-from-the-copy-installer).
+
+2. **Open Pi in your project** and run `/reload` if you just installed it.
+3. **Describe the task**, allowed paths and how you will judge the result, then run `/ppp <name>` with an unused kebab-case name. Review the generated `TASK.md` and `config.json`, including models and limits. Nothing starts yet.
+4. **Launch** with `/ppp <name>` again. Follow progress with `/ppp-status`. If the run asks you for input, answer with `/ppp-respond`.
+
+Example: “Add a dark-mode toggle. Limit edits to `src/` and `tests/`. It must survive reload and work by keyboard. Run the tests and tell me any browser behavior you couldn't verify. Prepare the run, don't launch yet.”
+
+Prerequisites, updates and the Codex skill: [user guide](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/GUIDE.md#install).
+
+## Three ways to run the Worker
+
+| Mode | Review happens | Bounded by |
 |---|---|---|
-| **Ping-pong** | After each settled ordinary Pi Worker iteration. | Cumulative iterations and active Worker time; per-iteration time and a separate checkpoint-repair bound. |
-| **Goal** | After a native Goal completes or reaches a real limit, not after every progress checkpoint. Corrections keep the same Pi history. | Cumulative active Worker time and number of native Goal launches; optional cumulative token cap. |
-| **Ralph** | After a bounded native multi-iteration loop returns a result or reaches a real limit. | Cumulative native iterations and active Worker time; per-iteration time. |
+| **Ping-pong** | after each Worker iteration | iterations and active time |
+| **Goal** | when a native Goal completes or hits a limit | active time, Goal launches, optional token cap |
+| **Ralph** | when a native Ralph loop returns or hits a limit | iterations and active time |
 
-Review has its own finite deadline. Corrections use remaining allowance rather than opening a new run budget. See the [run contract](references/reviewed-runs.md) for grants, recovery, and exact accounting.
+Goal and Ralph need their Pi extensions installed. Review has its own deadline, and corrections use the remaining allowance. Details: [run contract](https://github.com/SzpakLabs/pi-ping-pong/blob/main/references/reviewed-runs.md).
 
-## Get started
+## Good to know
 
-1. Install with `pi install npm:pi-ping-pong`. To follow the Git repository instead, use `pi install git:github.com/SzpakLabs/pi-ping-pong`. Use one source only. Python 3.10+ must already be on `PATH` as `python3`. If you used the old copy installer, [disable the copied receiver first](docs/GUIDE.md#migrate-from-the-copy-installer). See the [guide](docs/GUIDE.md#install) for prerequisites, updates, and the Codex skill.
-2. Open Pi in the project you want the Worker to edit. Run `/reload` if you just installed the receiver. New runs use `.pi/ping-pong/runs/`; [Git exclusion is best effort](docs/project-workspace.md#private-run-storage), not a preparation or launch requirement.
-3. Describe the task, allowed paths, and how you'd judge the result. Run `/ppp <name>` with an unused lowercase kebab-case name. Review the generated `TASK.md`, `config.json`, models, and limits. Preparation does not start the Worker.
-4. Run `/ppp <name>` again when the draft is ready and you want to launch. Use `/ppp-status` to inspect it. With headless review, the launching chat reports progress and collects confirmed human responses through `/ppp-respond`; a separate Pi session reviews the result.
+- **Works in place.** The Worker edits your selected project, including uncommitted files. Scope and budgets do not grant commit, push or deploy permission. The Reviewer's read-only tools are not an OS sandbox.
+- **Runs locally.** Keep the host and Pi session open. Model calls may cost money. Codex is an optional review transport, not a Worker mode ([prerequisites](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/GUIDE.md#quick-start-reviewer-in-codex)).
+- **Run records** live in `.pi/ping-pong/runs/`. Keep them out of version control; [Git exclusion is best effort](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/project-workspace.md#private-run-storage).
+- **Older runs.** `.pi-ping-pong/runs/` runs stay discoverable and are not migrated. Evaluator-era (protocol 1) runs cannot launch or resume on this version; their files are left alone.
+- **Local tests are not live validation.** [Manual validation](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/manual-e2e.md) is separate.
 
-Example task: “Add a dark-mode toggle. Limit edits to `src/` and `tests/`. The preference should survive reload and the toggle must work by keyboard. Run the project's tests and report any browser behavior you couldn't verify. Prepare the run with finite limits, but don't launch yet.”
-
-## Boundaries
-
-- **Works in place.** The Worker acts on the selected project, including uncommitted files. Keep private run records out of version control. The default headless Reviewer has read-only built-in tools, but this is not an OS sandbox. Task scope and budgets grant no commit, push, or deploy permission.
-- **Local runtime, configured model access.** Keep the host and Pi reporting session available. Model calls may incur usage charges. Codex is an optional review transport with [its own prerequisites](docs/GUIDE.md#quick-start-reviewer-in-codex); it is not a Worker mode. No Claude Code runtime or specific Claude model/provider combination is verified here.
-- **No in-place migration.** Existing `.pi-ping-pong/runs/` runs stay discoverable at their original paths. Prepare new protocol 2 / schema 1 runs without a separate evaluator. Protocol 1 and evaluator-era configs/runs cannot launch or resume on this runtime; their files are left alone.
-- **Local checks are not live validation.** Tests with synthetic processes check runtime behavior, not model judgment, provider compatibility, or unattended operation after closing the launching UI. [Manual validation](docs/manual-e2e.md) is separate.
-
-[User guide](docs/GUIDE.md) · [Full source documentation](https://github.com/SzpakLabs/pi-ping-pong/tree/main/docs) · [Skill](SKILL.md) · [MIT License](LICENSE)
+[User guide](https://github.com/SzpakLabs/pi-ping-pong/blob/main/docs/GUIDE.md) · [Documentation](https://github.com/SzpakLabs/pi-ping-pong/tree/main/docs) · [Skill](https://github.com/SzpakLabs/pi-ping-pong/blob/main/SKILL.md) · [MIT License](https://github.com/SzpakLabs/pi-ping-pong/blob/main/LICENSE)
