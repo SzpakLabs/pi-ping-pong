@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Maintainers: document how to test a local checkout in Pi.
+
 ## 0.1.3 - 2026-11-25
 
 - Rewrite the README as a shorter, scannable introduction with a four-step quick start.

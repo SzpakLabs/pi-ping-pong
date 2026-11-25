@@ -103,3 +103,12 @@ Current runs use protocol 2 / schema 1 without `eval_argv`. There is no separate
 ## Development checks
 
 From the repository root, `npm ci` and `uv sync --locked` install development dependencies. `bun run check` runs the fast Python and TypeScript suites. For changes spanning lifecycle and recovery, run `bun run check:integration`; scope narrower integration checks as described in [AGENTS.md](../AGENTS.md). The optional pre-commit hook runs `git diff --cached --check`, not the test suite.
+
+### Try your checkout in Pi
+
+Install only one PPP source at a time, so test a checkout instead of the npm copy, not beside it.
+
+- **One run:** `pi -ne -e /absolute/path/to/pi-ping-pong`. `-e` loads the checkout without changing settings; `-ne` skips other installed extensions, including the npm copy. Add `-e` for each extension you still need, such as Goal or Ralph. Check `/ppp-status`.
+- **Longer testing:** `pi remove npm:pi-ping-pong`, then `pi install /absolute/path/to/pi-ping-pong`. Pi loads the checkout in place, so update it with Git, not `pi update`. To return, remove that path and run `pi install npm:pi-ping-pong`.
+
+Both options run local code only. Paid Worker and Reviewer runs remain a separate manual test.
