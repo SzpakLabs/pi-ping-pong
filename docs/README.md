@@ -19,7 +19,7 @@
 
 These notes document earlier requirements, prototypes, and verification. Some use the removed evaluator lifecycle or propose future work that is not implemented. They do not override the current contract or establish live acceptance of this checkout.
 
-- Design and planning: [roadmap v7](ROADMAP.md), [three-mode design](three-mode-target.md), [Worker/Reviewer pipeline note](mvp-pipeline.md), [observer separation](observer-reviewer-separation.md), and [autonomous-run integration plan](autonomous-run-integration-plan.md).
+- Design and planning: [roadmap v7](ROADMAP.md), [three-mode design](three-mode-target.md), [Worker/Reviewer pipeline note](mvp-pipeline.md), [observer separation](observer-reviewer-separation.md), and [autonomous-run integration plan](autonomous-run-integration-plan.md), and [future ideas](future-ideas.md).
 - Investigations: [start/status dogfooding](start-status-dogfooding.md), [permission friction](permission-friction-research.md), and [action-scoped execution](action-scoped-execution.md).
 - Action-scoped implementation: [plan](action-scoped-implementation-plan.md), [implementation report](action-scoped-implementation-report.md), [verification](action-scoped-verification.md), and [independent audit](action-scoped-independent-audit.md).
 - Earlier protocol-2 evidence: [F1/F2 hardening](protocol-2-f1-f2-hardening.md), [F3/F4 hardening](protocol-2-f3-f4-hardening.md), [regression audit](protocol-2-regression-audit.md), and [E2E gate remediation](protocol-2-e2e-gate-remediation.md).
